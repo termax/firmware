@@ -1658,7 +1658,41 @@ int Screen::handleTextMessage(const meshtastic_MeshPacket *packet)
             // Incoming message
             devicestate.has_rx_text_message = true; // Needed to include the message frame
             hasUnreadMessage = true;                // Enables mail icon in the header
-            setFrames(FOCUS_PRESERVE);              // Refresh frame list without switching view (no-op during text_input)
+#ifdef MOONHUT_SIGN
+            // MoonHut: only the private MoonFleet channel drives the sign.
+            {
+                meshtastic_Channel mfch = channels.getByIndex(packet->channel);
+                if (strcmp(mfch.settings.name, "MoonFleet") == 0) {
+                    const meshtastic_NodeInfoLite *snode = nodeDB->getMeshNode(packet->from);
+                    const char *sname =
+                        (snode && snode->has_user && snode->user.short_name[0]) ? snode->user.short_name : "???";
+                    char attr[64];
+                    uint32_t when = getValidTime(RTCQualityDevice, true);
+                    if (when > 0) {
+                        uint32_t ds = when % 86400;
+                        snprintf(attr, sizeof(attr), "%s  %02u:%02u", sname, (unsigned)(ds / 3600),
+                                 (unsigned)((ds % 3600) / 60));
+                    } else {
+                        snprintf(attr, sizeof(attr), "%s", sname);
+                    }
+                    graphics::MessageRenderer::setMoonSignMessage(
+                        reinterpret_cast<const char *>(packet->decoded.payload.bytes), attr);
+                    // Take over the screen with the sign (same jump as UIFrameEvent SWITCH_TO_TEXTMESSAGE)
+                    setFrames(FOCUS_PRESERVE);
+                    ui->switchToFrame(framesetInfo.positions.textMessage);
+                    setFastFramerate();
+                    if (shouldWakeOnReceivedMessage()) {
+                        setOn(true);
+                        forceDisplay();
+                    }
+                    return 0; // sign handled; skip the generic "New Message" banner
+                }
+            }
+            // Non-MoonFleet: don't hijack the sign, just refresh the frame list quietly.
+            setFrames(FOCUS_PRESERVE); // Refresh frame list without switching view (no-op during text_input)
+#else
+            setFrames(FOCUS_PRESERVE); // Refresh frame list without switching view (no-op during text_input)
+#endif
 
             // Only wake/force display if the configuration allows it
             if (shouldWakeOnReceivedMessage()) {

@@ -41,6 +41,11 @@ void drawStringWithEmotes(OLEDDisplay *display, int x, int y, const std::string 
 /// Draws the text message frame for displaying received messages
 void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 
+#ifdef MOONHUT_SIGN
+/// MoonHut: store the latest MoonFleet message + tiny attribution for the fullscreen sign frame
+void setMoonSignMessage(const char *msg, const char *attribution);
+#endif
+
 // Function to generate lines with word wrapping
 std::vector<std::string> generateLines(OLEDDisplay *display, const char *headerStr, const char *messageBuf, int textWidth);
 

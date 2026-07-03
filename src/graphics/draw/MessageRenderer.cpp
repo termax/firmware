@@ -13,6 +13,9 @@
 #include "graphics/SharedUIDisplay.h"
 #include "graphics/TimeFormatters.h"
 #include "graphics/emotes.h"
+#ifdef MOONHUT_SIGN
+#include "graphics/fonts/EinkDisplayFonts.h" // global scope: Monospaced_plain_30 for the MoonHut sign
+#endif
 #include "main.h"
 #include "meshUtils.h"
 #include <string>
@@ -315,8 +318,137 @@ static void drawMessageScrollbar(OLEDDisplay *display, int visibleHeight, int to
     }
 }
 
+#ifdef MOONHUT_SIGN
+// ---- MoonHut sign: latest MoonFleet message, rendered fullscreen with an adaptive font ----
+static char s_moonMsg[200] = "";
+static char s_moonAttr[64] = "";
+static bool s_moonHas = false;
+
+void setMoonSignMessage(const char *msg, const char *attribution)
+{
+    if (!msg)
+        return;
+    strncpy(s_moonMsg, msg, sizeof(s_moonMsg) - 1);
+    s_moonMsg[sizeof(s_moonMsg) - 1] = '\0';
+    strncpy(s_moonAttr, attribution ? attribution : "", sizeof(s_moonAttr) - 1);
+    s_moonAttr[sizeof(s_moonAttr) - 1] = '\0';
+    s_moonHas = true;
+}
+
+// Tiny crescent-moon accent. Ink is drawn in WHITE (renders dark on e-ink); BLACK carves the crescent.
+static void drawMoonAccent(OLEDDisplay *display, int cx, int cy, int r)
+{
+    display->setColor(WHITE);
+    display->fillCircle(cx, cy, r);
+    display->setColor(BLACK);
+    display->fillCircle(cx + (r * 3) / 5, cy - (r * 2) / 5, r);
+    display->setColor(WHITE);
+}
+
+// Analytic word-wrap height (px) for the currently-set font, mirroring drawStringMaxWidth's
+// wrapping: break on spaces, force-break a single word that is wider than the line.
+static int moonWrappedHeight(OLEDDisplay *display, const char *text, int maxWidth, int lineHeight)
+{
+    int lines = 1;
+    int curW = 0;
+    const int spaceW = display->getStringWidth(" ");
+    const char *p = text;
+    char word[80];
+    while (*p) {
+        int wl = 0;
+        while (*p && *p != ' ' && *p != '\n' && wl < (int)sizeof(word) - 1)
+            word[wl++] = *p++;
+        word[wl] = '\0';
+        bool newline = (*p == '\n');
+        if (*p)
+            p++; // consume the delimiter
+        int ww = wl ? display->getStringWidth(word, wl) : 0;
+        if (curW == 0)
+            curW = ww;
+        else if (curW + spaceW + ww <= maxWidth)
+            curW += spaceW + ww;
+        else {
+            lines++;
+            curW = ww;
+        }
+        while (curW > maxWidth) { // force-break an overlong word across lines
+            lines++;
+            curW -= maxWidth;
+        }
+        if (newline) {
+            lines++;
+            curW = 0;
+        }
+    }
+    return lines * lineHeight;
+}
+
+static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
+{
+    hasUnreadMessage = false;
+    const int W = SCREEN_WIDTH;
+    const int H = SCREEN_HEIGHT;
+    const int tinyH = 13; // ArialMT_Plain_10 line height
+
+    display->clear();
+    display->setColor(WHITE);
+
+    // Idle state: no MoonFleet message yet
+    if (!s_moonHas || s_moonMsg[0] == '\0') {
+        drawMoonAccent(display, W / 2, H / 2 - 14, 12);
+        display->setFont(ArialMT_Plain_16);
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(W / 2, H / 2 + 4, "MoonHut");
+        return;
+    }
+
+    const int msgWidth = W - 4;
+    const int msgTop = 1;
+    const int msgBottom = H - (s_moonAttr[0] ? tinyH : 0) - 1;
+    const int msgAreaH = msgBottom - msgTop;
+
+    // Adaptive sizing: pick the largest font whose wrapped message fits the area.
+    // Shorter messages land on a bigger font; longer ones step down, then wrap.
+    const uint8_t *fonts[] = {Monospaced_plain_30, ArialMT_Plain_24, ArialMT_Plain_16, ArialMT_Plain_10};
+    const uint8_t *chosen = fonts[3];
+    int chosenH = 0;
+    for (int i = 0; i < 4; i++) {
+        display->setFont(fonts[i]);
+        int lineHeight = pgm_read_byte(fonts[i] + 1) + 1; // font height byte
+        int h = moonWrappedHeight(display, s_moonMsg, msgWidth, lineHeight);
+        chosen = fonts[i];
+        chosenH = h;
+        if (h <= msgAreaH)
+            break;
+    }
+
+    // Vertically center within the message area using the real wrapped height.
+    int msgY = msgTop + (msgAreaH - chosenH) / 2;
+    if (msgY < msgTop)
+        msgY = msgTop;
+    display->setFont(chosen);
+    display->setTextAlignment(TEXT_ALIGN_CENTER);
+    display->drawStringMaxWidth(W / 2, msgY, msgWidth, s_moonMsg);
+
+    // Small moon accent, tucked in the top-left corner so it barely intrudes on the message.
+    drawMoonAccent(display, 9, 9, 7);
+
+    // Tiny attribution (sender + time) bottom-right.
+    if (s_moonAttr[0]) {
+        display->setFont(ArialMT_Plain_10);
+        display->setTextAlignment(TEXT_ALIGN_RIGHT);
+        display->drawString(W - 2, H - tinyH, s_moonAttr);
+    }
+}
+#endif // MOONHUT_SIGN
+
 void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
+#ifdef MOONHUT_SIGN
+    // MoonHut: the text-message frame IS the sign — render the latest MoonFleet message fullscreen.
+    drawMoonSignFrame(display, x, y);
+    return;
+#endif
     // Ensure any boot-relative timestamps are upgraded if RTC is valid
     messageStore.upgradeBootRelativeTimestamps();
 
@@ -324,6 +456,7 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
         resetScrollState();
         didReset = true;
     }
+
 
     // Clear the unread message indicator when viewing the message
     hasUnreadMessage = false;
