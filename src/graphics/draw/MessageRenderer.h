@@ -42,7 +42,7 @@ void drawStringWithEmotes(OLEDDisplay *display, int x, int y, const std::string 
 void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y);
 
 #ifdef MOONHUT_SIGN
-/// MoonHut: store the latest MoonFleet message + tiny attribution for the fullscreen sign frame
+/// MoonHut: store the latest MoonPaper message + tiny attribution for the fullscreen sign frame
 void setMoonSignMessage(const char *msg, const char *attribution);
 #endif
 

@@ -319,7 +319,7 @@ static void drawMessageScrollbar(OLEDDisplay *display, int visibleHeight, int to
 }
 
 #ifdef MOONHUT_SIGN
-// ---- MoonHut sign: latest MoonFleet message, rendered fullscreen with an adaptive font ----
+// ---- MoonHut sign: latest MoonPaper message, rendered fullscreen with an adaptive font ----
 static char s_moonMsg[200] = "";
 static char s_moonAttr[64] = "";
 static bool s_moonHas = false;
@@ -445,7 +445,7 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
 void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y)
 {
 #ifdef MOONHUT_SIGN
-    // MoonHut: the text-message frame IS the sign — render the latest MoonFleet message fullscreen.
+    // MoonHut: the text-message frame IS the sign — render the latest MoonPaper message fullscreen.
     drawMoonSignFrame(display, x, y);
     return;
 #endif

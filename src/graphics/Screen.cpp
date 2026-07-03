@@ -1659,10 +1659,10 @@ int Screen::handleTextMessage(const meshtastic_MeshPacket *packet)
             devicestate.has_rx_text_message = true; // Needed to include the message frame
             hasUnreadMessage = true;                // Enables mail icon in the header
 #ifdef MOONHUT_SIGN
-            // MoonHut: only the private MoonFleet channel drives the sign.
+            // MoonHut: only the private MoonPaper channel drives the sign.
             {
                 meshtastic_Channel mfch = channels.getByIndex(packet->channel);
-                if (strcmp(mfch.settings.name, "MoonFleet") == 0) {
+                if (strcmp(mfch.settings.name, "MoonPaper") == 0) {
                     const meshtastic_NodeInfoLite *snode = nodeDB->getMeshNode(packet->from);
                     const char *sname =
                         (snode && snode->has_user && snode->user.short_name[0]) ? snode->user.short_name : "???";
@@ -1680,15 +1680,16 @@ int Screen::handleTextMessage(const meshtastic_MeshPacket *packet)
                     // Take over the screen with the sign (same jump as UIFrameEvent SWITCH_TO_TEXTMESSAGE)
                     setFrames(FOCUS_PRESERVE);
                     ui->switchToFrame(framesetInfo.positions.textMessage);
-                    setFastFramerate();
-                    if (shouldWakeOnReceivedMessage()) {
-                        setOn(true);
-                        forceDisplay();
-                    }
+                    // A sign must always show the new message, regardless of wake-on-message
+                    // config. forceDisplay(true) renders a fresh UI frame BEFORE pushing to the
+                    // e-ink panel; the plain forceDisplay() pushed the stale framebuffer and the
+                    // e-ink rate limiter then swallowed the real update.
+                    setOn(true);
+                    forceDisplay(true);
                     return 0; // sign handled; skip the generic "New Message" banner
                 }
             }
-            // Non-MoonFleet: don't hijack the sign, just refresh the frame list quietly.
+            // Non-MoonPaper: don't hijack the sign, just refresh the frame list quietly.
             setFrames(FOCUS_PRESERVE); // Refresh frame list without switching view (no-op during text_input)
 #else
             setFrames(FOCUS_PRESERVE); // Refresh frame list without switching view (no-op during text_input)
