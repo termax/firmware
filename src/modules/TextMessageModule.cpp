@@ -67,6 +67,17 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
         UIFrameEvent e;
         e.action = UIFrameEvent::Action::SWITCH_TO_TEXTMESSAGE;
         screen->handleUIFrameEvent(&e); // jump to the sign frame (drawTextMessageFrame renders it) + fast refresh
+
+#ifdef LED_POWER
+        // Blink the onboard LED (normally solid ON as the power indicator) to draw
+        // attention to the new sign message. Blocking, like the LED blinks in main.cpp.
+        for (int i = 0; i < 4; i++) {
+            digitalWrite(LED_POWER, LED_STATE_OFF);
+            delay(120);
+            digitalWrite(LED_POWER, LED_STATE_ON);
+            delay(120);
+        }
+#endif
     }
 #endif
     // Only trigger screen wake if configuration allows it
