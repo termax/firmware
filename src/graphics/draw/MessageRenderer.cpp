@@ -384,6 +384,22 @@ static int moonWrappedHeight(OLEDDisplay *display, const char *text, int maxWidt
     return lines * lineHeight;
 }
 
+// Bottom status row shared by the sign and the idle screensaver:
+// battery % left, device name centered (attribution right is drawn by the caller).
+static void drawMoonBottomRow(OLEDDisplay *display, int W, int H, int tinyH)
+{
+    if (powerStatus && powerStatus->getHasBattery()) {
+        char batt[8];
+        snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
+        display->setFont(ArialMT_Plain_10);
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        display->drawString(2, H - tinyH, batt);
+    }
+    display->setFont(ArialMT_Plain_10);
+    display->setTextAlignment(TEXT_ALIGN_CENTER);
+    display->drawString(W / 2, H - tinyH, owner.long_name);
+}
+
 static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
 {
     hasUnreadMessage = false;
@@ -394,12 +410,47 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     display->clear();
     display->setColor(WHITE);
 
-    // Idle state: no MoonFleet message yet
+    // Idle state (fresh boot, no message yet): sleeping-moon screensaver
     if (!s_moonHas || s_moonMsg[0] == '\0') {
-        drawMoonAccent(display, W / 2, H / 2 - 14, 12);
-        display->setFont(ArialMT_Plain_16);
+        // Night sky
+        static const uint8_t stars[][2] = {{12, 10},  {30, 22},  {60, 10}, {90, 8},   {115, 14}, {140, 6}, {170, 10},
+                                           {200, 6},  {228, 12}, {240, 30}, {18, 78},  {238, 68}, {120, 20}};
+        for (size_t i = 0; i < sizeof(stars) / sizeof(stars[0]); i++)
+            display->setPixel(stars[i][0], stars[i][1]);
+        // A few 4-point sparkles
+        static const uint8_t sparks[][2] = {{25, 40}, {215, 18}, {185, 70}};
+        for (size_t i = 0; i < sizeof(sparks) / sizeof(sparks[0]); i++) {
+            const int sx = sparks[i][0], sy = sparks[i][1];
+            display->drawLine(sx - 2, sy, sx + 2, sy);
+            display->drawLine(sx, sy - 2, sx, sy + 2);
+        }
+
+        // Big sleeping crescent moon with a closed eye and a soft smile
+        const int cx = 55, cy = 52, r = 18;
+        drawMoonAccent(display, cx, cy, r);
+        display->setColor(BLACK);
+        display->drawLine(cx - 11, cy + 1, cx - 5, cy + 1); // closed eye ‿
+        display->setPixel(cx - 12, cy);
+        display->setPixel(cx - 4, cy);
+        display->drawLine(cx - 9, cy + 8, cx - 5, cy + 8); // smile ‿
+        display->setPixel(cx - 10, cy + 7);
+        display->setPixel(cx - 4, cy + 7);
+        display->setColor(WHITE);
+
+        // z's drifting up from the moon
+        display->setFont(ArialMT_Plain_10);
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        display->drawString(cx + 22, cy - 24, "z");
+        display->drawString(cx + 30, cy - 31, "z");
+        display->drawString(cx + 39, cy - 38, "z");
+
+        display->setFont(ArialMT_Plain_24);
         display->setTextAlignment(TEXT_ALIGN_CENTER);
-        display->drawString(W / 2, H / 2 + 4, "MoonHut");
+        display->drawString(165, 34, "MoonHut");
+        display->setFont(ArialMT_Plain_10);
+        display->drawString(165, 64, "waiting for messages...");
+
+        drawMoonBottomRow(display, W, H, tinyH);
         return;
     }
 
@@ -441,19 +492,8 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
         display->drawString(W - 2, H - tinyH, s_moonAttr);
     }
 
-    // Tiny battery percentage bottom-left, same row and size as the attribution.
-    if (powerStatus && powerStatus->getHasBattery()) {
-        char batt[8];
-        snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
-        display->setFont(ArialMT_Plain_10);
-        display->setTextAlignment(TEXT_ALIGN_LEFT);
-        display->drawString(2, H - tinyH, batt);
-    }
-
-    // Device name, always centered in the same bottom row.
-    display->setFont(ArialMT_Plain_10);
-    display->setTextAlignment(TEXT_ALIGN_CENTER);
-    display->drawString(W / 2, H - tinyH, owner.long_name);
+    // Battery % left + device name centered, same row.
+    drawMoonBottomRow(display, W, H, tinyH);
 }
 #endif // MOONHUT_SIGN
 

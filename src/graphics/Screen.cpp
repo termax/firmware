@@ -1328,7 +1328,14 @@ void Screen::setFrames(FrameFocus focus)
     // Focus on a specific frame, in the frame set we just created
     switch (focus) {
     case FOCUS_DEFAULT:
+#ifdef MOONHUT_SIGN
+        // MoonHut: the sign (textMessage frame) is the home screen — it shows the last
+        // message, or the screensaver when there is none. The stock Meshtastic frames
+        // stay reachable with the page button.
+        ui->switchToFrame(fsi.positions.textMessage);
+#else
         ui->switchToFrame(fsi.positions.deviceFocused);
+#endif
         break;
     case FOCUS_FAULT:
         ui->switchToFrame(fsi.positions.fault);

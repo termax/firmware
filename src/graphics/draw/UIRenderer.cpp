@@ -1036,8 +1036,8 @@ void UIRenderer::drawScreensaverOverlay(OLEDDisplay *display, OLEDDisplayUiState
     LOG_DEBUG("Draw screensaver overlay");
 
 #ifdef MOONHUT_SIGN
-    // MoonHut: no big "name | Screen Paused" badge over the sign — just a small
-    // "zzz.." next to the battery % in the bottom row (same size as the attribution).
+    // MoonHut: no big "name | Screen Paused" badge over the sign — a little comic-style
+    // sleep motif next to the battery %: tiny crescent moon with z's floating up from it.
     EINK_ADD_FRAMEFLAG(display, COSMETIC); // Full refresh for screensaver
     display->setColor(WHITE);
     display->setFont(ArialMT_Plain_10);
@@ -1048,7 +1048,17 @@ void UIRenderer::drawScreensaverOverlay(OLEDDisplay *display, OLEDDisplayUiState
         snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
         battW = display->getStringWidth(batt);
     }
-    display->drawString(2 + battW + 6, display->height() - 13, "zzz..");
+    const int16_t baseX = 2 + battW + 8;
+    const int16_t rowY = display->height() - 13;
+    // Tiny crescent moon (ink circle, carved by a background circle)
+    display->fillCircle(baseX + 5, rowY + 7, 5);
+    display->setColor(BLACK);
+    display->fillCircle(baseX + 8, rowY + 5, 5);
+    display->setColor(WHITE);
+    // z's drifting up and away from the moon
+    display->drawString(baseX + 13, rowY, "z");
+    display->drawString(baseX + 19, rowY - 3, "z");
+    display->drawString(baseX + 26, rowY - 6, "z");
     return;
 #endif
 
