@@ -1,4 +1,5 @@
 #include "TextMessageModule.h"
+#include "Channels.h"
 #include "MeshService.h"
 #include "MessageStore.h"
 #include "NodeDB.h"
@@ -24,6 +25,14 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
     // We only store/display messages destined for us.
     devicestate.rx_text_message = mp;
     devicestate.has_rx_text_message = true;
+    bool suppressBanner = false;
+#ifdef MOONHUT_SIGN
+    // MoonHut: MoonPaper messages take over the e-ink fullscreen via the sign frame
+    // (Screen::handleTextMessage); the stock "New Message" banner would draw over it and
+    // freeze on the e-ink, so suppress it for that channel only.
+    suppressBanner = strcmp(channels.getByIndex(mp.channel).settings.name, "MoonPaper") == 0;
+#endif
+    (void)suppressBanner;
     IF_SCREEN(
         // Guard against running in MeshtasticUI or with no screen
         if (config.display.displaymode != meshtastic_Config_DisplayConfig_DisplayMode_COLOR) {
@@ -32,8 +41,10 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
 
             // Pass message to renderer (banner + thread switching + scroll reset)
             // Use the global Screen singleton to retrieve the current OLED display
-            auto *display = screen ? screen->getDisplayDevice() : nullptr;
-            graphics::MessageRenderer::handleNewMessage(display, sm, mp);
+            if (!suppressBanner) {
+                auto *display = screen ? screen->getDisplayDevice() : nullptr;
+                graphics::MessageRenderer::handleNewMessage(display, sm, mp);
+            }
         })
     // Only trigger screen wake if configuration allows it
     if (shouldWakeOnReceivedMessage()) {
