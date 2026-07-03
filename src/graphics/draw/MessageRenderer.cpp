@@ -14,6 +14,7 @@
 #include "graphics/TimeFormatters.h"
 #include "graphics/emotes.h"
 #ifdef MOONHUT_SIGN
+#include "PowerStatus.h"                     // battery percentage in the sign's bottom row
 #include "graphics/fonts/EinkDisplayFonts.h" // global scope: Monospaced_plain_30 for the MoonHut sign
 #endif
 #include "main.h"
@@ -438,6 +439,15 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
         display->setFont(ArialMT_Plain_10);
         display->setTextAlignment(TEXT_ALIGN_RIGHT);
         display->drawString(W - 2, H - tinyH, s_moonAttr);
+    }
+
+    // Tiny battery percentage bottom-left, same row and size as the attribution.
+    if (powerStatus && powerStatus->getHasBattery()) {
+        char batt[8];
+        snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
+        display->setFont(ArialMT_Plain_10);
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        display->drawString(2, H - tinyH, batt);
     }
 }
 #endif // MOONHUT_SIGN
