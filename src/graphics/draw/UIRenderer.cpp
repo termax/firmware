@@ -1035,6 +1035,23 @@ void UIRenderer::drawScreensaverOverlay(OLEDDisplay *display, OLEDDisplayUiState
 {
     LOG_DEBUG("Draw screensaver overlay");
 
+#ifdef MOONHUT_SIGN
+    // MoonHut: no big "name | Screen Paused" badge over the sign — just a small
+    // "zzz.." next to the battery % in the bottom row (same size as the attribution).
+    EINK_ADD_FRAMEFLAG(display, COSMETIC); // Full refresh for screensaver
+    display->setColor(WHITE);
+    display->setFont(ArialMT_Plain_10);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+    int16_t battW = 0;
+    if (powerStatus && powerStatus->getHasBattery()) {
+        char batt[8];
+        snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
+        battW = display->getStringWidth(batt);
+    }
+    display->drawString(2 + battW + 6, display->height() - 13, "zzz..");
+    return;
+#endif
+
     EINK_ADD_FRAMEFLAG(display, COSMETIC); // Full refresh for screensaver
 
     // Config

@@ -449,6 +449,11 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
         display->setTextAlignment(TEXT_ALIGN_LEFT);
         display->drawString(2, H - tinyH, batt);
     }
+
+    // Device name, always centered in the same bottom row.
+    display->setFont(ArialMT_Plain_10);
+    display->setTextAlignment(TEXT_ALIGN_CENTER);
+    display->drawString(W / 2, H - tinyH, owner.long_name);
 }
 #endif // MOONHUT_SIGN
 
