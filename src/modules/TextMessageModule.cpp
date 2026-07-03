@@ -70,12 +70,13 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
 
 #ifdef LED_POWER
         // Blink the onboard LED (normally solid ON as the power indicator) to draw
-        // attention to the new sign message. Blocking, like the LED blinks in main.cpp.
-        for (int i = 0; i < 4; i++) {
+        // attention to the new sign message. Blocking, like the LED blinks in main.cpp;
+        // ~3s total is acceptable for a dedicated sign node.
+        for (int i = 0; i < 10; i++) {
             digitalWrite(LED_POWER, LED_STATE_OFF);
-            delay(120);
+            delay(150);
             digitalWrite(LED_POWER, LED_STATE_ON);
-            delay(120);
+            delay(150);
         }
 #endif
     }
