@@ -242,6 +242,10 @@ class Screen : public concurrency::OSThread
     void setFrames(FrameFocus focus = FOCUS_DEFAULT);
 
     std::vector<const uint8_t *> indicatorIcons; // Per-frame custom icon pointers
+#ifdef MOONHUT_SIGN
+    // MoonHut: lets the nav-bar overlay skip drawing over the sign (textMessage) frame
+    uint8_t moonSignFrameIndex() const { return framesetInfo.positions.textMessage; }
+#endif
     Screen(const Screen &) = delete;
     Screen &operator=(const Screen &) = delete;
 

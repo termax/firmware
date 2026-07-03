@@ -1447,6 +1447,13 @@ void UIRenderer::drawNavigationBar(OLEDDisplay *display, OLEDDisplayUiState *sta
 {
     int currentFrame = state->currentFrame;
 
+#ifdef MOONHUT_SIGN
+    // MoonHut: don't flash the frame-icon bar over the sign when a message jumps to it;
+    // manual button navigation on other frames keeps the bar.
+    if (currentFrame == screen->moonSignFrameIndex())
+        return;
+#endif
+
     // Detect frame change and record time
     if (currentFrame != lastFrameIndex) {
         lastFrameIndex = currentFrame;
