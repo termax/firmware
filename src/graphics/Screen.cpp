@@ -944,15 +944,6 @@ int32_t Screen::runOnce()
             break;
         case Cmd::ON_PRESS:
             if (NotificationRenderer::current_notification_type != notificationTypeEnum::text_input) {
-#ifdef MOONHUT_SIGN
-                // On the sign frame, PRG flips through the pages of a long message instead
-                // of navigating frames (so a missed auto-cycle can be replayed by hand).
-                if (ui->getUiState()->currentFrame == framesetInfo.positions.textMessage &&
-                    graphics::MessageRenderer::moonSignNextPage()) {
-                    setFastFramerate();
-                    break;
-                }
-#endif
                 showFrame(FrameDirection::NEXT);
             }
             break;
@@ -1935,6 +1926,16 @@ int Screen::handleInputEvent(const InputEvent *event)
             if (event->inputEvent == INPUT_BROKER_LEFT || event->inputEvent == INPUT_BROKER_ALT_PRESS) {
                 showFrame(FrameDirection::PREVIOUS);
             } else if (event->inputEvent == INPUT_BROKER_RIGHT || event->inputEvent == INPUT_BROKER_USER_PRESS) {
+#ifdef MOONHUT_SIGN
+                // On the sign frame, PRG flips through the pages of a long message instead of
+                // navigating frames (so a missed auto-cycle can be replayed by hand).
+                if (event->inputEvent == INPUT_BROKER_USER_PRESS &&
+                    ui->getUiState()->currentFrame == framesetInfo.positions.textMessage &&
+                    graphics::MessageRenderer::moonSignNextPage()) {
+                    setFastFramerate();
+                    return 0;
+                }
+#endif
                 showFrame(FrameDirection::NEXT);
             } else if (event->inputEvent == INPUT_BROKER_FN_F1) {
                 this->ui->switchToFrame(0);
