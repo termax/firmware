@@ -202,6 +202,13 @@ uint32_t error_address = 0;
 
 static uint8_t ourMacAddr[6];
 
+#if defined(HAS_SDCARD) && !defined(SDCARD_USE_SOFT_SPI)
+#include <SD.h>
+static const char *moonSdBackupFile = "/MeshBackup.proto"; // config backup on the SD card root
+#endif
+// MoonHut: true when this boot had to install a default config (blank/wiped filesystem)
+static bool moonDefaultsInstalled = false;
+
 NodeDB::NodeDB()
 {
     LOG_INFO("Init NodeDB");
@@ -460,6 +467,25 @@ NodeDB::NodeDB()
 #endif
     sortMeshDB();
     saveToDisk(saveWhat);
+
+#if defined(MOONHUT_SD_AUTORESTORE) && defined(HAS_SDCARD) && !defined(SDCARD_USE_SOFT_SPI)
+    // MoonHut: fully automatic config survival across Launcher firmware swaps.
+    // Blank boot (defaults were installed because the filesystem was wiped/repartitioned)
+    // + a backup present on SD -> restore everything and reboot to apply.
+    // Healthy configured boot -> refresh the SD backup so it always mirrors current config.
+    // (setupSDCard() runs before NodeDB is constructed, so the card is already mounted.)
+    if (moonDefaultsInstalled) {
+        if (restorePreferences(meshtastic_AdminMessage_BackupLocation_SD,
+                               SEGMENT_CONFIG | SEGMENT_MODULECONFIG | SEGMENT_DEVICESTATE | SEGMENT_CHANNELS)) {
+            LOG_INFO("MoonHut SD auto-restore complete - rebooting to apply");
+            rebootAtMsec = millis() + 8000;
+        }
+    } else if (config.lora.region != meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+        // Guard: only overwrite the SD backup with a REAL config (region set). This keeps an
+        // intentional factory reset from clobbering the good backup with a blank one.
+        backupPreferences(meshtastic_AdminMessage_BackupLocation_SD);
+    }
+#endif
 }
 
 /**
@@ -564,6 +590,7 @@ void NodeDB::installDefaultNodeDatabase()
 
 void NodeDB::installDefaultConfig(bool preserveKey = false)
 {
+    moonDefaultsInstalled = true; // MoonHut: mark this boot as blank for SD auto-restore
     uint8_t private_key_temp[32];
     bool shouldPreserveKey = preserveKey && config.has_security && config.security.private_key.size > 0;
     if (shouldPreserveKey) {
@@ -2208,7 +2235,38 @@ bool NodeDB::backupPreferences(meshtastic_AdminMessage_BackupLocation location)
             LOG_ERROR("Failed to save backup preferences to file");
         }
     } else if (location == meshtastic_AdminMessage_BackupLocation_SD) {
-        // TODO: After more mainline SD card support
+#if defined(HAS_SDCARD) && !defined(SDCARD_USE_SOFT_SPI)
+        meshtastic_BackupPreferences backup = meshtastic_BackupPreferences_init_zero;
+        backup.version = DEVICESTATE_CUR_VER;
+        backup.timestamp = getValidTime(RTCQuality::RTCQualityDevice, false);
+        backup.has_config = true;
+        backup.config = config;
+        backup.has_module_config = true;
+        backup.module_config = moduleConfig;
+        backup.has_channels = true;
+        backup.channels = channelFile;
+        backup.has_owner = true;
+        backup.owner = owner;
+
+        std::vector<uint8_t> buffer(meshtastic_BackupPreferences_size);
+        pb_ostream_t stream = pb_ostream_from_buffer(buffer.data(), buffer.size());
+        if (!pb_encode(&stream, &meshtastic_BackupPreferences_msg, &backup)) {
+            LOG_ERROR("Failed to encode SD backup");
+            return false;
+        }
+        concurrency::LockGuard g(spiLock);
+        File f = SD.open(moonSdBackupFile, FILE_WRITE);
+        if (!f) {
+            LOG_WARN("SD backup: cannot open %s (no card?)", moonSdBackupFile);
+            return false;
+        }
+        success = f.write(buffer.data(), stream.bytes_written) == stream.bytes_written;
+        f.close();
+        if (success)
+            LOG_INFO("Saved backup preferences to SD (%u bytes)", (unsigned)stream.bytes_written);
+        else
+            LOG_ERROR("Failed to write SD backup");
+#endif
     }
 #endif
     return success;
@@ -2258,7 +2316,59 @@ bool NodeDB::restorePreferences(meshtastic_AdminMessage_BackupLocation location,
             LOG_ERROR("Failed to restore preferences from backup file");
         }
     } else if (location == meshtastic_AdminMessage_BackupLocation_SD) {
-        // TODO: After more mainline SD card support
+#if defined(HAS_SDCARD) && !defined(SDCARD_USE_SOFT_SPI)
+        std::vector<uint8_t> buffer;
+        {
+            concurrency::LockGuard g(spiLock);
+            File f = SD.open(moonSdBackupFile, FILE_READ);
+            if (!f) {
+                LOG_WARN("SD restore: %s not found (no card or no backup)", moonSdBackupFile);
+                return false;
+            }
+            size_t fsize = f.size();
+            if (fsize == 0 || fsize > meshtastic_BackupPreferences_size + 256) {
+                f.close();
+                LOG_ERROR("SD restore: implausible backup size %u", (unsigned)fsize);
+                return false;
+            }
+            buffer.resize(fsize);
+            if ((size_t)f.read(buffer.data(), fsize) != fsize) {
+                f.close();
+                LOG_ERROR("SD restore: short read");
+                return false;
+            }
+            f.close();
+        }
+        meshtastic_BackupPreferences backup = meshtastic_BackupPreferences_init_zero;
+        pb_istream_t stream = pb_istream_from_buffer(buffer.data(), buffer.size());
+        success = pb_decode(&stream, &meshtastic_BackupPreferences_msg, &backup);
+        if (!success) {
+            LOG_ERROR("SD restore: failed to decode backup");
+            return false;
+        }
+        if (restoreWhat & SEGMENT_CONFIG) {
+            config = backup.config;
+            LOG_DEBUG("Restored config from SD");
+        }
+        if (restoreWhat & SEGMENT_MODULECONFIG) {
+            moduleConfig = backup.module_config;
+            LOG_DEBUG("Restored module config from SD");
+        }
+        if (restoreWhat & SEGMENT_DEVICESTATE) {
+            devicestate.owner = backup.owner;
+            LOG_DEBUG("Restored device state from SD");
+        }
+        if (restoreWhat & SEGMENT_CHANNELS) {
+            channelFile = backup.channels;
+            LOG_DEBUG("Restored channels from SD");
+        }
+        success = saveToDisk(restoreWhat);
+        if (success) {
+            LOG_INFO("Restored preferences from SD backup");
+        } else {
+            LOG_ERROR("Failed to save SD-restored preferences to flash");
+        }
+#endif
     }
 #endif
     return success;

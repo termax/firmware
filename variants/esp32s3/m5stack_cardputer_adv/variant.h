@@ -59,6 +59,15 @@
 #define SX126X_DIO3_TCXO_VOLTAGE 1.8
 #define TCXO_OPTIONAL
 
+// SD card — shares the LoRa SPI bus (SCK 40 / MISO 39 / MOSI 14), separate CS.
+// Pins verified against bmorcelli/Launcher's "Cardputer & ADV" board config, which
+// demonstrably drives this slot on the Adv. spiLock arbitrates radio vs SD access.
+#define HAS_SDCARD
+#define SPI_SCK 40
+#define SPI_MISO 39
+#define SPI_MOSI 14
+#define SDCARD_CS 12
+
 #undef GPS_RX_PIN
 #undef GPS_TX_PIN
 #define GPS_RX_PIN 15
