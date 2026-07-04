@@ -44,6 +44,9 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
 #ifdef MOONHUT_SIGN
 /// MoonHut: store the latest MoonPaper message + tiny attribution for the fullscreen sign frame
 void setMoonSignMessage(const char *msg, const char *attribution);
+/// MoonHut: PRG press on the sign frame flips to the next page of a paged message.
+/// Returns false when there's nothing to flip (single page) so the caller can do frame navigation instead.
+bool moonSignNextPage();
 #endif
 
 // Function to generate lines with word wrapping

@@ -944,6 +944,15 @@ int32_t Screen::runOnce()
             break;
         case Cmd::ON_PRESS:
             if (NotificationRenderer::current_notification_type != notificationTypeEnum::text_input) {
+#ifdef MOONHUT_SIGN
+                // On the sign frame, PRG flips through the pages of a long message instead
+                // of navigating frames (so a missed auto-cycle can be replayed by hand).
+                if (ui->getUiState()->currentFrame == framesetInfo.positions.textMessage &&
+                    graphics::MessageRenderer::moonSignNextPage()) {
+                    setFastFramerate();
+                    break;
+                }
+#endif
                 showFrame(FrameDirection::NEXT);
             }
             break;

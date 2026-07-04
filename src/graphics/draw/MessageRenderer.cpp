@@ -342,6 +342,17 @@ static std::vector<uint8_t> s_moonRowFontIdx;    // font index per row
 static std::vector<int> s_moonPageFirstRow;      // first row index of each page
 static uint32_t s_moonPagingStart = 0;
 static int s_moonLastPage = -1;
+static int s_moonManualPage = -1; // >=0: user flips pages with the PRG button; auto-cycling stops
+
+bool moonSignNextPage()
+{
+    const int pages = (int)s_moonPageFirstRow.size();
+    if (!s_moonHas || pages <= 1)
+        return false;
+    const int cur = (s_moonLastPage >= 0) ? s_moonLastPage : 0;
+    s_moonManualPage = (cur + 1) % pages;
+    return true;
+}
 
 void setMoonSignMessage(const char *msg, const char *attribution)
 {
@@ -510,7 +521,7 @@ static void drawMoonBottomRow(OLEDDisplay *display, int W, int H, int tinyH)
     }
     display->setFont(ArialMT_Plain_10);
     display->setTextAlignment(TEXT_ALIGN_CENTER);
-    display->drawString(W / 2, H - tinyH, owner.long_name);
+    display->drawString(W / 2, H - tinyH, owner.short_name); // short name (4 chars) keeps the row uncrowded
 }
 
 static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
@@ -578,27 +589,32 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
         s_moonDirty = false;
         s_moonPagingStart = millis();
         s_moonLastPage = -1;
+        s_moonManualPage = -1; // new message returns to auto-cycling
     }
 
-    // Paging state: cycle all pages MOON_PAGE_CYCLES times, then rest truncated on page 1
+    // Paging state: cycle all pages MOON_PAGE_CYCLES times, then rest on page 1.
+    // A PRG press (moonSignNextPage) overrides with manual flipping until the next message.
     const int pages = (int)s_moonPageFirstRow.size();
     int page = 0;
-    bool resting = false;
     if (pages > 1) {
-        uint32_t seq = (millis() - s_moonPagingStart) / MOON_PAGE_MS;
-        if (seq < (uint32_t)pages * MOON_PAGE_CYCLES) {
-            page = (int)(seq % pages);
+        bool autoCycling = false;
+        if (s_moonManualPage >= 0) {
+            page = s_moonManualPage;
         } else {
-            resting = true; // stays on page 1 (+ellipsis) until the next message
+            uint32_t seq = (millis() - s_moonPagingStart) / MOON_PAGE_MS;
+            if (seq < (uint32_t)pages * MOON_PAGE_CYCLES) {
+                page = (int)(seq % pages);
+                autoCycling = true;
+            } // else: resting on page 1 until the next message (or a PRG press)
         }
-        if (!resting && page != s_moonLastPage) {
+        if (page != s_moonLastPage) {
             s_moonLastPage = page;
-            // Each page flip counts as user activity (same event the keyboard uses) so the
-            // screen stays awake through the cycles — EVENT_RECEIVED_MSG does NOT reset the
-            // screen timer and let it pause mid-cycle. Once resting, no more pokes and the
-            // normal screen timeout applies.
-            powerFSM.trigger(EVENT_PRESS);
-            // And make the e-ink show the new page NOW rather than on the throttled
+            // While auto-cycling, each flip counts as user activity (same event the keyboard
+            // uses) so the screen stays awake — EVENT_RECEIVED_MSG does NOT reset the screen
+            // timer. Manual flips come from a real button press which already woke the FSM.
+            if (autoCycling)
+                powerFSM.trigger(EVENT_PRESS);
+            // Make the e-ink show the new page NOW rather than on the throttled
             // background-refresh cadence.
             EINK_ADD_FRAMEFLAG(display, DEMAND_FAST);
         }
@@ -636,16 +652,15 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     // Battery % left + device name centered, same row.
     drawMoonBottomRow(display, W, H, tinyH);
 
-    // Page indicator right after the centered device name: "2/3" while cycling,
-    // "1/3..." when resting truncated. (NOT next to the battery — the sleep-moon
-    // motif of the screensaver overlay draws there.)
+    // Page indicator to the LEFT of the centered device name (right side belongs to the
+    // attribution; battery corner belongs to the sleep-moon overlay).
     if (pages > 1) {
         char pg[12];
-        snprintf(pg, sizeof(pg), resting ? "%d/%d..." : "%d/%d", page + 1, pages);
+        snprintf(pg, sizeof(pg), "%d/%d", page + 1, pages);
         display->setFont(ArialMT_Plain_10);
-        int nameW = display->getStringWidth(owner.long_name);
-        display->setTextAlignment(TEXT_ALIGN_LEFT);
-        display->drawString(W / 2 + nameW / 2 + 8, H - tinyH, pg);
+        int nameW = display->getStringWidth(owner.short_name);
+        display->setTextAlignment(TEXT_ALIGN_RIGHT);
+        display->drawString(W / 2 - nameW / 2 - 8, H - tinyH, pg);
     }
 }
 #endif // MOONHUT_SIGN
