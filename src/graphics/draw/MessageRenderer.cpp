@@ -16,6 +16,7 @@
 #ifdef MOONHUT_SIGN
 #include "PowerFSM.h"                        // page flips poke the FSM to hold the screen awake while cycling
 #include "PowerStatus.h"                     // battery percentage in the sign's bottom row
+#include "graphics/EInkDynamicDisplay.h"     // EINK_ADD_FRAMEFLAG: page flips demand an immediate fast refresh
 #include "graphics/fonts/EinkDisplayFonts.h" // global scope: Monospaced_plain_30 for the MoonHut sign
 #endif
 #include "main.h"
@@ -592,9 +593,14 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
         }
         if (!resting && page != s_moonLastPage) {
             s_moonLastPage = page;
-            // Each page flip counts as activity so the screen stays awake through the cycles;
-            // once resting, no more pokes and the normal screen timeout applies.
-            powerFSM.trigger(EVENT_RECEIVED_MSG);
+            // Each page flip counts as user activity (same event the keyboard uses) so the
+            // screen stays awake through the cycles — EVENT_RECEIVED_MSG does NOT reset the
+            // screen timer and let it pause mid-cycle. Once resting, no more pokes and the
+            // normal screen timeout applies.
+            powerFSM.trigger(EVENT_PRESS);
+            // And make the e-ink show the new page NOW rather than on the throttled
+            // background-refresh cadence.
+            EINK_ADD_FRAMEFLAG(display, DEMAND_FAST);
         }
     }
 
@@ -630,13 +636,16 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     // Battery % left + device name centered, same row.
     drawMoonBottomRow(display, W, H, tinyH);
 
-    // Page indicator next to the battery: "2/3" while cycling, "1/3..." when resting truncated
+    // Page indicator right after the centered device name: "2/3" while cycling,
+    // "1/3..." when resting truncated. (NOT next to the battery — the sleep-moon
+    // motif of the screensaver overlay draws there.)
     if (pages > 1) {
         char pg[12];
         snprintf(pg, sizeof(pg), resting ? "%d/%d..." : "%d/%d", page + 1, pages);
         display->setFont(ArialMT_Plain_10);
+        int nameW = display->getStringWidth(owner.long_name);
         display->setTextAlignment(TEXT_ALIGN_LEFT);
-        display->drawString(38, H - tinyH, pg);
+        display->drawString(W / 2 + nameW / 2 + 8, H - tinyH, pg);
     }
 }
 #endif // MOONHUT_SIGN
