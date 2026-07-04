@@ -14,6 +14,7 @@
 #include "graphics/TimeFormatters.h"
 #include "graphics/emotes.h"
 #ifdef MOONHUT_SIGN
+#include "PowerFSM.h"                        // page flips poke the FSM to hold the screen awake while cycling
 #include "PowerStatus.h"                     // battery percentage in the sign's bottom row
 #include "graphics/fonts/EinkDisplayFonts.h" // global scope: Monospaced_plain_30 for the MoonHut sign
 #endif
@@ -320,10 +321,26 @@ static void drawMessageScrollbar(OLEDDisplay *display, int visibleHeight, int to
 }
 
 #ifdef MOONHUT_SIGN
-// ---- MoonHut sign: latest MoonPaper message, rendered fullscreen with an adaptive font ----
+// ---- MoonHut sign: latest MoonPaper message, rendered fullscreen ----
+// Layout policy (agreed 2026-07-04): user line breaks are never removed. Each user line
+// gets its own font — the largest that lets the whole block fit; when the block is too
+// tall, the tallest (tie: longest) lines shrink first, so short lines stay big. If the
+// block still overflows at the floor font, the message is split into pages and cycled
+// MOON_PAGE_CYCLES times, then rests on page 1 with an ellipsis until the next message.
+#define MOON_MIN_FONT_IDX 3 // floor font index into MOON_FONTS (3 = ArialMT_Plain_10); set 2 for a 16pt floor
+#define MOON_PAGE_MS 8000   // ms per page while cycling
+#define MOON_PAGE_CYCLES 3  // full passes through all pages before resting truncated
+
+static const uint8_t *MOON_FONTS[] = {Monospaced_plain_30, ArialMT_Plain_24, ArialMT_Plain_16, ArialMT_Plain_10};
 static char s_moonMsg[200] = "";
 static char s_moonAttr[64] = "";
 static bool s_moonHas = false;
+static bool s_moonDirty = false;
+static std::vector<std::string> s_moonRows;      // final wrapped rows, in draw order
+static std::vector<uint8_t> s_moonRowFontIdx;    // font index per row
+static std::vector<int> s_moonPageFirstRow;      // first row index of each page
+static uint32_t s_moonPagingStart = 0;
+static int s_moonLastPage = -1;
 
 void setMoonSignMessage(const char *msg, const char *attribution)
 {
@@ -334,6 +351,7 @@ void setMoonSignMessage(const char *msg, const char *attribution)
     strncpy(s_moonAttr, attribution ? attribution : "", sizeof(s_moonAttr) - 1);
     s_moonAttr[sizeof(s_moonAttr) - 1] = '\0';
     s_moonHas = true;
+    s_moonDirty = true; // layout is recomputed on next render (needs the display for text metrics)
 }
 
 // Tiny crescent-moon accent. Ink is drawn in WHITE (renders dark on e-ink); BLACK carves the crescent.
@@ -346,42 +364,136 @@ static void drawMoonAccent(OLEDDisplay *display, int cx, int cy, int r)
     display->setColor(WHITE);
 }
 
-// Analytic word-wrap height (px) for the currently-set font, mirroring drawStringMaxWidth's
-// wrapping: break on spaces, force-break a single word that is wider than the line.
-static int moonWrappedHeight(OLEDDisplay *display, const char *text, int maxWidth, int lineHeight)
+static inline int moonFontH(uint8_t fontIdx)
 {
-    int lines = 1;
-    int curW = 0;
-    const int spaceW = display->getStringWidth(" ");
-    const char *p = text;
-    char word[80];
-    while (*p) {
-        int wl = 0;
-        while (*p && *p != ' ' && *p != '\n' && wl < (int)sizeof(word) - 1)
-            word[wl++] = *p++;
-        word[wl] = '\0';
-        bool newline = (*p == '\n');
-        if (*p)
-            p++; // consume the delimiter
-        int ww = wl ? display->getStringWidth(word, wl) : 0;
-        if (curW == 0)
-            curW = ww;
-        else if (curW + spaceW + ww <= maxWidth)
-            curW += spaceW + ww;
-        else {
-            lines++;
-            curW = ww;
-        }
-        while (curW > maxWidth) { // force-break an overlong word across lines
-            lines++;
-            curW -= maxWidth;
-        }
-        if (newline) {
-            lines++;
-            curW = 0;
-        }
+    return pgm_read_byte(MOON_FONTS[fontIdx] + 1) + 1;
+}
+
+// Wrap one user line at the given font into rows: break on spaces; a single word wider
+// than the line is force-broken at UTF-8 character boundaries. Empty lines produce one
+// empty row (preserving the user's visual break).
+static void moonWrapLine(OLEDDisplay *display, const std::string &text, int maxWidth, uint8_t fontIdx,
+                         std::vector<std::string> &rowsOut)
+{
+    display->setFont(MOON_FONTS[fontIdx]);
+    if (text.empty()) {
+        rowsOut.push_back("");
+        return;
     }
-    return lines * lineHeight;
+    std::string cur;
+    size_t i = 0;
+    while (i < text.size()) {
+        std::string word;
+        while (i < text.size() && text[i] != ' ')
+            word += text[i++];
+        if (i < text.size())
+            i++; // consume the space
+        std::string cand = cur.empty() ? word : cur + " " + word;
+        if ((int)display->getStringWidth(cand.c_str(), cand.size()) <= maxWidth) {
+            cur = cand;
+            continue;
+        }
+        if (!cur.empty()) {
+            rowsOut.push_back(cur);
+            cur.clear();
+        }
+        // Word alone is too wide: split at UTF-8 boundaries
+        while ((int)display->getStringWidth(word.c_str(), word.size()) > maxWidth) {
+            size_t cut = word.size();
+            while (cut > 1) {
+                cut--;
+                while (cut > 1 && (word[cut] & 0xC0) == 0x80)
+                    cut--; // don't split inside a UTF-8 sequence
+                if ((int)display->getStringWidth(word.c_str(), cut) <= maxWidth)
+                    break;
+            }
+            rowsOut.push_back(word.substr(0, cut));
+            word = word.substr(cut);
+        }
+        cur = word;
+    }
+    if (!cur.empty())
+        rowsOut.push_back(cur);
+}
+
+// Compute the full layout for the current message: per-user-line fonts, wrapped rows, pages.
+static void moonLayout(OLEDDisplay *display, int maxWidth, int areaH)
+{
+    // Split into user lines, preserving every \n
+    std::vector<std::string> lines;
+    {
+        std::string cur;
+        for (const char *p = s_moonMsg; *p; p++) {
+            if (*p == '\n') {
+                lines.push_back(cur);
+                cur.clear();
+            } else {
+                cur += *p;
+            }
+        }
+        lines.push_back(cur);
+    }
+    const int n = (int)lines.size();
+
+    // Start every non-empty line at the largest font; empty lines cost the floor font's height
+    std::vector<uint8_t> fidx(n);
+    std::vector<int> hgt(n);
+    std::vector<std::string> scratch;
+    auto lineHeight = [&](int i) {
+        if (lines[i].empty())
+            return moonFontH(MOON_MIN_FONT_IDX);
+        scratch.clear();
+        moonWrapLine(display, lines[i], maxWidth, fidx[i], scratch);
+        return (int)scratch.size() * moonFontH(fidx[i]);
+    };
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        fidx[i] = lines[i].empty() ? MOON_MIN_FONT_IDX : 0;
+        hgt[i] = lineHeight(i);
+        total += hgt[i];
+    }
+
+    // Shrink the tallest (tie: longest) shrinkable line until the block fits or all hit the floor
+    while (total > areaH) {
+        int best = -1;
+        for (int i = 0; i < n; i++) {
+            if (lines[i].empty() || fidx[i] >= MOON_MIN_FONT_IDX)
+                continue;
+            if (best < 0 || hgt[i] > hgt[best] || (hgt[i] == hgt[best] && lines[i].size() > lines[best].size()))
+                best = i;
+        }
+        if (best < 0)
+            break; // everything at the floor — paging will handle the overflow
+        fidx[best]++;
+        total -= hgt[best];
+        hgt[best] = lineHeight(best);
+        total += hgt[best];
+    }
+
+    // Build the final row list
+    s_moonRows.clear();
+    s_moonRowFontIdx.clear();
+    for (int i = 0; i < n; i++) {
+        size_t before = s_moonRows.size();
+        moonWrapLine(display, lines[i], maxWidth, fidx[i], s_moonRows);
+        while (s_moonRowFontIdx.size() < s_moonRows.size())
+            s_moonRowFontIdx.push_back(fidx[i]);
+        (void)before;
+    }
+
+    // Pack rows into pages by height
+    s_moonPageFirstRow.clear();
+    int h = 0;
+    for (size_t r = 0; r < s_moonRows.size(); r++) {
+        int rh = moonFontH(s_moonRowFontIdx[r]);
+        if (s_moonPageFirstRow.empty() || h + rh > areaH) {
+            s_moonPageFirstRow.push_back((int)r);
+            h = 0;
+        }
+        h += rh;
+    }
+    if (s_moonPageFirstRow.empty())
+        s_moonPageFirstRow.push_back(0);
 }
 
 // Bottom status row shared by the sign and the idle screensaver:
@@ -456,31 +568,54 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
 
     const int msgWidth = W - 4;
     const int msgTop = 1;
-    const int msgBottom = H - (s_moonAttr[0] ? tinyH : 0) - 1;
+    const int msgBottom = H - tinyH - 1; // bottom status row is always drawn
     const int msgAreaH = msgBottom - msgTop;
 
-    // Adaptive sizing: pick the largest font whose wrapped message fits the area.
-    // Shorter messages land on a bigger font; longer ones step down, then wrap.
-    const uint8_t *fonts[] = {Monospaced_plain_30, ArialMT_Plain_24, ArialMT_Plain_16, ArialMT_Plain_10};
-    const uint8_t *chosen = fonts[3];
-    int chosenH = 0;
-    for (int i = 0; i < 4; i++) {
-        display->setFont(fonts[i]);
-        int lineHeight = pgm_read_byte(fonts[i] + 1) + 1; // font height byte
-        int h = moonWrappedHeight(display, s_moonMsg, msgWidth, lineHeight);
-        chosen = fonts[i];
-        chosenH = h;
-        if (h <= msgAreaH)
-            break;
+    // (Re)compute layout for a new message: per-line fonts, wrapped rows, pages
+    if (s_moonDirty) {
+        moonLayout(display, msgWidth, msgAreaH);
+        s_moonDirty = false;
+        s_moonPagingStart = millis();
+        s_moonLastPage = -1;
     }
 
-    // Vertically center within the message area using the real wrapped height.
-    int msgY = msgTop + (msgAreaH - chosenH) / 2;
-    if (msgY < msgTop)
-        msgY = msgTop;
-    display->setFont(chosen);
+    // Paging state: cycle all pages MOON_PAGE_CYCLES times, then rest truncated on page 1
+    const int pages = (int)s_moonPageFirstRow.size();
+    int page = 0;
+    bool resting = false;
+    if (pages > 1) {
+        uint32_t seq = (millis() - s_moonPagingStart) / MOON_PAGE_MS;
+        if (seq < (uint32_t)pages * MOON_PAGE_CYCLES) {
+            page = (int)(seq % pages);
+        } else {
+            resting = true; // stays on page 1 (+ellipsis) until the next message
+        }
+        if (!resting && page != s_moonLastPage) {
+            s_moonLastPage = page;
+            // Each page flip counts as activity so the screen stays awake through the cycles;
+            // once resting, no more pokes and the normal screen timeout applies.
+            powerFSM.trigger(EVENT_RECEIVED_MSG);
+        }
+    }
+
+    // Rows of the current page
+    const int rFirst = s_moonPageFirstRow[page];
+    const int rEnd = (page + 1 < pages) ? s_moonPageFirstRow[page + 1] : (int)s_moonRows.size();
+    int blockH = 0;
+    for (int r = rFirst; r < rEnd; r++)
+        blockH += moonFontH(s_moonRowFontIdx[r]);
+
+    // Single page: vertically centered as before. Multi-page: top-aligned for stable reading.
+    int rowY = (pages == 1) ? msgTop + (msgAreaH - blockH) / 2 : msgTop;
+    if (rowY < msgTop)
+        rowY = msgTop;
     display->setTextAlignment(TEXT_ALIGN_CENTER);
-    display->drawStringMaxWidth(W / 2, msgY, msgWidth, s_moonMsg);
+    for (int r = rFirst; r < rEnd; r++) {
+        display->setFont(MOON_FONTS[s_moonRowFontIdx[r]]);
+        if (!s_moonRows[r].empty())
+            display->drawString(W / 2, rowY, s_moonRows[r].c_str());
+        rowY += moonFontH(s_moonRowFontIdx[r]);
+    }
 
     // Small moon accent, tucked in the top-left corner so it barely intrudes on the message.
     drawMoonAccent(display, 9, 9, 7);
@@ -494,6 +629,15 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
 
     // Battery % left + device name centered, same row.
     drawMoonBottomRow(display, W, H, tinyH);
+
+    // Page indicator next to the battery: "2/3" while cycling, "1/3..." when resting truncated
+    if (pages > 1) {
+        char pg[12];
+        snprintf(pg, sizeof(pg), resting ? "%d/%d..." : "%d/%d", page + 1, pages);
+        display->setFont(ArialMT_Plain_10);
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        display->drawString(38, H - tinyH, pg);
+    }
 }
 #endif // MOONHUT_SIGN
 
