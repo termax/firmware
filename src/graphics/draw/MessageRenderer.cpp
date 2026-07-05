@@ -349,6 +349,11 @@ static char s_moonMsg[200] = "";
 static char s_moonAttr[64] = "";
 static bool s_moonHas = false;
 static bool s_moonDirty = false;
+static bool s_moonNewPersistent = false; // fresh MoonPaper message → restart paging cycles
+static char s_moonFlashMsg[200] = "";    // transient overlay (DMs / other channels), never replaces s_moonMsg
+static char s_moonFlashAttr[64] = "";
+static uint32_t s_moonFlashUntil = 0;    // millis deadline; expired = show persistent message again
+static bool s_moonLayoutIsFlash = false; // which text the row cache currently holds
 static std::vector<std::string> s_moonRows;      // final wrapped rows, in draw order
 static std::vector<uint8_t> s_moonRowFontIdx;    // font index per row
 static std::vector<int> s_moonRowH;              // pixel height per row (font or emote, whichever is taller)
@@ -357,8 +362,17 @@ static uint32_t s_moonPagingStart = 0;
 static int s_moonLastPage = -1;
 static int s_moonManualPage = -1; // >=0: user flips pages with the PRG button; auto-cycling stops
 
+static inline bool moonFlashActive()
+{
+    return s_moonFlashMsg[0] && (int32_t)(millis() - s_moonFlashUntil) < 0;
+}
+
 bool moonSignNextPage()
 {
+    if (moonFlashActive()) { // PRG dismisses a flash early
+        s_moonFlashUntil = 0;
+        return true;
+    }
     const int pages = (int)s_moonPageFirstRow.size();
     if (!s_moonHas || pages <= 1)
         return false;
@@ -377,6 +391,20 @@ void setMoonSignMessage(const char *msg, const char *attribution)
     s_moonAttr[sizeof(s_moonAttr) - 1] = '\0';
     s_moonHas = true;
     s_moonDirty = true; // layout is recomputed on next render (needs the display for text metrics)
+    s_moonNewPersistent = true;
+    s_moonFlashUntil = 0; // a new sign message outranks any flash in progress
+}
+
+void setMoonFlashMessage(const char *msg, const char *attribution, uint32_t durationMs)
+{
+    if (!msg || !msg[0])
+        return;
+    strncpy(s_moonFlashMsg, msg, sizeof(s_moonFlashMsg) - 1);
+    s_moonFlashMsg[sizeof(s_moonFlashMsg) - 1] = '\0';
+    strncpy(s_moonFlashAttr, attribution ? attribution : "", sizeof(s_moonFlashAttr) - 1);
+    s_moonFlashAttr[sizeof(s_moonFlashAttr) - 1] = '\0';
+    s_moonFlashUntil = millis() + durationMs;
+    s_moonDirty = true;
 }
 
 // Tiny crescent-moon accent. Ink is drawn in WHITE (renders dark on e-ink); BLACK carves the crescent.
@@ -462,13 +490,13 @@ static bool moonNeedsLocalizedFont(const std::string &s)
 }
 
 // Compute the full layout for the current message: per-user-line fonts, wrapped rows, pages.
-static void moonLayout(OLEDDisplay *display, int maxWidth, int areaH)
+static void moonLayout(OLEDDisplay *display, int maxWidth, int areaH, const char *sourceText)
 {
     // Split into user lines, preserving every \n
     std::vector<std::string> lines;
     {
         std::string cur;
-        for (const char *p = s_moonMsg; *p; p++) {
+        for (const char *p = sourceText; *p; p++) {
             if (*p == '\n') {
                 lines.push_back(cur);
                 cur.clear();
@@ -580,8 +608,8 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     display->clear();
     display->setColor(WHITE);
 
-    // Idle state (fresh boot, no message yet): sleeping-moon screensaver
-    if (!s_moonHas || s_moonMsg[0] == '\0') {
+    // Idle state (fresh boot, no message yet, and nothing flashing): sleeping-moon screensaver
+    if (!moonFlashActive() && (!s_moonHas || s_moonMsg[0] == '\0')) {
         // Night sky
         static const uint8_t stars[][2] = {{12, 10},  {30, 22},  {60, 10}, {90, 8},   {115, 14}, {140, 6}, {170, 10},
                                            {200, 6},  {228, 12}, {240, 30}, {18, 78},  {238, 68}, {120, 20}};
@@ -629,20 +657,37 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     const int msgBottom = H - tinyH - 1; // bottom status row is always drawn
     const int msgAreaH = msgBottom - msgTop;
 
-    // (Re)compute layout for a new message: per-line fonts, wrapped rows, pages
-    if (s_moonDirty) {
-        moonLayout(display, msgWidth, msgAreaH);
+    // Decide which text owns the screen: an active flash (DM / other-channel message)
+    // temporarily overlays the persistent MoonPaper message, then it comes back.
+    const bool flashActive = moonFlashActive();
+
+    // (Re)layout when a new message arrived OR the flash/persistent source changed
+    if (s_moonDirty || flashActive != s_moonLayoutIsFlash) {
+        moonLayout(display, msgWidth, msgAreaH, flashActive ? s_moonFlashMsg : s_moonMsg);
+        s_moonLayoutIsFlash = flashActive;
         s_moonDirty = false;
-        s_moonPagingStart = millis();
         s_moonLastPage = -1;
-        s_moonManualPage = -1; // new message returns to auto-cycling
+        EINK_ADD_FRAMEFLAG(display, DEMAND_FAST); // repaint promptly on any source switch
+        if (!flashActive) {
+            const int pgs = (int)s_moonPageFirstRow.size();
+            if (s_moonNewPersistent) {
+                // Fresh MoonPaper message: full paging cycles from the start
+                s_moonNewPersistent = false;
+                s_moonPagingStart = millis();
+                s_moonManualPage = -1;
+            } else {
+                // Returning from a flash: settle directly on the resting view (page 1)
+                s_moonPagingStart = millis() - (uint32_t)pgs * MOON_PAGE_CYCLES * MOON_PAGE_MS;
+            }
+        }
     }
 
     // Paging state: cycle all pages MOON_PAGE_CYCLES times, then rest on page 1.
     // A PRG press (moonSignNextPage) overrides with manual flipping until the next message.
+    // A flash never pages: it shows its first page for its few seconds, then expires.
     const int pages = (int)s_moonPageFirstRow.size();
     int page = 0;
-    if (pages > 1) {
+    if (!flashActive && pages > 1) {
         bool autoCycling = false;
         if (s_moonManualPage >= 0) {
             page = s_moonManualPage;
@@ -694,19 +739,20 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     // Small moon accent, tucked in the top-left corner so it barely intrudes on the message.
     drawMoonAccent(display, 9, 9, 7);
 
-    // Tiny attribution (sender + time) bottom-right. MOON_FONT_S so Cyrillic sender names render.
-    if (s_moonAttr[0]) {
+    // Tiny attribution (sender + time) bottom-right; a flash shows its own (prefixed) one.
+    const char *attr = flashActive ? s_moonFlashAttr : s_moonAttr;
+    if (attr[0]) {
         display->setFont(MOON_FONT_S);
         display->setTextAlignment(TEXT_ALIGN_RIGHT);
-        display->drawString(W - 2, H - tinyH, s_moonAttr);
+        display->drawString(W - 2, H - tinyH, attr);
     }
 
     // Battery % left + device name centered, same row.
     drawMoonBottomRow(display, W, H, tinyH);
 
     // Page indicator to the LEFT of the centered device name (right side belongs to the
-    // attribution; battery corner belongs to the sleep-moon overlay).
-    if (pages > 1) {
+    // attribution; battery corner belongs to the sleep-moon overlay). Hidden during a flash.
+    if (!flashActive && pages > 1) {
         char pg[12];
         snprintf(pg, sizeof(pg), "%d/%d", page + 1, pages);
         display->setFont(MOON_FONT_S);
