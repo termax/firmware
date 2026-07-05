@@ -475,7 +475,8 @@ class Screen : public concurrency::OSThread
         }
 
         // We want to strip out prefix chars for two-byte char formats
-        if (ch == 0xC2 || ch == 0xC3 || ch == 0x82 || ch == 0xD0 || ch == 0xD1)
+        // (0xD2 included: it's the lead byte of Ukrainian Ґ/ґ — without it a stray glyph renders first)
+        if (ch == 0xC2 || ch == 0xC3 || ch == 0x82 || ch == 0xD0 || ch == 0xD1 || ch == 0xD2)
             return (uint8_t)0;
 
 #endif
