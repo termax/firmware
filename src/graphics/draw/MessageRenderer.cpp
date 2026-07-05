@@ -332,13 +332,26 @@ static void drawMessageScrollbar(OLEDDisplay *display, int visibleHeight, int to
 #define MOON_PAGE_MS 8000   // ms per page while cycling
 #define MOON_PAGE_CYCLES 3  // full passes through all pages before resting truncated
 
-static const uint8_t *MOON_FONTS[] = {Monospaced_plain_30, ArialMT_Plain_24, ArialMT_Plain_16, ArialMT_Plain_10};
+#ifdef OLED_RU
+// Cyrillic-capable ladder: the _RU faces cover Latin + CP-1251 Cyrillic (the UTF-8
+// mapping lives in customFontTableLookup). The 30pt mono is Latin-only, so lines
+// containing non-ASCII start one step down (see moonLayout).
+#define MOON_FONT_L ArialMT_Plain_24_RU
+#define MOON_FONT_M ArialMT_Plain_16_RU
+#define MOON_FONT_S ArialMT_Plain_10_RU
+#else
+#define MOON_FONT_L ArialMT_Plain_24
+#define MOON_FONT_M ArialMT_Plain_16
+#define MOON_FONT_S ArialMT_Plain_10
+#endif
+static const uint8_t *MOON_FONTS[] = {Monospaced_plain_30, MOON_FONT_L, MOON_FONT_M, MOON_FONT_S};
 static char s_moonMsg[200] = "";
 static char s_moonAttr[64] = "";
 static bool s_moonHas = false;
 static bool s_moonDirty = false;
 static std::vector<std::string> s_moonRows;      // final wrapped rows, in draw order
 static std::vector<uint8_t> s_moonRowFontIdx;    // font index per row
+static std::vector<int> s_moonRowH;              // pixel height per row (font or emote, whichever is taller)
 static std::vector<int> s_moonPageFirstRow;      // first row index of each page
 static uint32_t s_moonPagingStart = 0;
 static int s_moonLastPage = -1;
@@ -392,6 +405,8 @@ static void moonWrapLine(OLEDDisplay *display, const std::string &text, int maxW
         rowsOut.push_back("");
         return;
     }
+    // Width measurement is emote-aware: emoji tokens count as their bitmap width.
+    auto lineW = [&](const std::string &s) { return EmoteRenderer::measureStringWithEmotes(display, s); };
     std::string cur;
     size_t i = 0;
     while (i < text.size()) {
@@ -401,7 +416,7 @@ static void moonWrapLine(OLEDDisplay *display, const std::string &text, int maxW
         if (i < text.size())
             i++; // consume the space
         std::string cand = cur.empty() ? word : cur + " " + word;
-        if ((int)display->getStringWidth(cand.c_str(), cand.size()) <= maxWidth) {
+        if (lineW(cand) <= maxWidth) {
             cur = cand;
             continue;
         }
@@ -410,13 +425,13 @@ static void moonWrapLine(OLEDDisplay *display, const std::string &text, int maxW
             cur.clear();
         }
         // Word alone is too wide: split at UTF-8 boundaries
-        while ((int)display->getStringWidth(word.c_str(), word.size()) > maxWidth) {
+        while (lineW(word) > maxWidth) {
             size_t cut = word.size();
             while (cut > 1) {
                 cut--;
                 while (cut > 1 && (word[cut] & 0xC0) == 0x80)
                     cut--; // don't split inside a UTF-8 sequence
-                if ((int)display->getStringWidth(word.c_str(), cut) <= maxWidth)
+                if (lineW(word.substr(0, cut)) <= maxWidth)
                     break;
             }
             rowsOut.push_back(word.substr(0, cut));
@@ -426,6 +441,24 @@ static void moonWrapLine(OLEDDisplay *display, const std::string &text, int maxW
     }
     if (!cur.empty())
         rowsOut.push_back(cur);
+}
+
+// True if the string contains non-ASCII text OUTSIDE of emote tokens (e.g. Cyrillic) —
+// such lines can't use the Latin-only 30pt font. Emoji render as bitmaps at any font.
+static bool moonNeedsLocalizedFont(const std::string &s)
+{
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t matchLen = 0;
+        if (EmoteRenderer::findEmoteAt(s, i, matchLen) && matchLen > 0) {
+            i += matchLen;
+            continue;
+        }
+        if ((unsigned char)s[i] >= 0x80)
+            return true;
+        i++;
+    }
+    return false;
 }
 
 // Compute the full layout for the current message: per-user-line fonts, wrapped rows, pages.
@@ -460,7 +493,15 @@ static void moonLayout(OLEDDisplay *display, int maxWidth, int areaH)
     };
     int total = 0;
     for (int i = 0; i < n; i++) {
-        fidx[i] = lines[i].empty() ? MOON_MIN_FONT_IDX : 0;
+        if (lines[i].empty()) {
+            fidx[i] = MOON_MIN_FONT_IDX;
+        } else {
+#ifdef OLED_RU
+            fidx[i] = moonNeedsLocalizedFont(lines[i]) ? 1 : 0; // 30pt mono has no Cyrillic glyphs
+#else
+            fidx[i] = 0;
+#endif
+        }
         hgt[i] = lineHeight(i);
         total += hgt[i];
     }
@@ -482,22 +523,27 @@ static void moonLayout(OLEDDisplay *display, int maxWidth, int areaH)
         total += hgt[best];
     }
 
-    // Build the final row list
+    // Build the final row list; row height accounts for emote bitmaps taller than the font
     s_moonRows.clear();
     s_moonRowFontIdx.clear();
+    s_moonRowH.clear();
     for (int i = 0; i < n; i++) {
-        size_t before = s_moonRows.size();
         moonWrapLine(display, lines[i], maxWidth, fidx[i], s_moonRows);
-        while (s_moonRowFontIdx.size() < s_moonRows.size())
+        while (s_moonRowFontIdx.size() < s_moonRows.size()) {
+            size_t r = s_moonRowFontIdx.size();
             s_moonRowFontIdx.push_back(fidx[i]);
-        (void)before;
+            display->setFont(MOON_FONTS[fidx[i]]);
+            int fh = moonFontH(fidx[i]);
+            EmoteRenderer::LineMetrics m = EmoteRenderer::analyzeLine(display, s_moonRows[r], fh - 1);
+            s_moonRowH.push_back(m.hasEmote ? std::max(fh, m.tallestHeight + 1) : fh);
+        }
     }
 
     // Pack rows into pages by height
     s_moonPageFirstRow.clear();
     int h = 0;
     for (size_t r = 0; r < s_moonRows.size(); r++) {
-        int rh = moonFontH(s_moonRowFontIdx[r]);
+        int rh = s_moonRowH[r];
         if (s_moonPageFirstRow.empty() || h + rh > areaH) {
             s_moonPageFirstRow.push_back((int)r);
             h = 0;
@@ -515,11 +561,11 @@ static void drawMoonBottomRow(OLEDDisplay *display, int W, int H, int tinyH)
     if (powerStatus && powerStatus->getHasBattery()) {
         char batt[8];
         snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
-        display->setFont(ArialMT_Plain_10);
+        display->setFont(MOON_FONT_S);
         display->setTextAlignment(TEXT_ALIGN_LEFT);
         display->drawString(2, H - tinyH, batt);
     }
-    display->setFont(ArialMT_Plain_10);
+    display->setFont(MOON_FONT_S);
     display->setTextAlignment(TEXT_ALIGN_CENTER);
     display->drawString(W / 2, H - tinyH, owner.short_name); // short name (4 chars) keeps the row uncrowded
 }
@@ -625,26 +671,32 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     const int rEnd = (page + 1 < pages) ? s_moonPageFirstRow[page + 1] : (int)s_moonRows.size();
     int blockH = 0;
     for (int r = rFirst; r < rEnd; r++)
-        blockH += moonFontH(s_moonRowFontIdx[r]);
+        blockH += s_moonRowH[r];
 
     // Single page: vertically centered as before. Multi-page: top-aligned for stable reading.
     int rowY = (pages == 1) ? msgTop + (msgAreaH - blockH) / 2 : msgTop;
     if (rowY < msgTop)
         rowY = msgTop;
-    display->setTextAlignment(TEXT_ALIGN_CENTER);
+    display->setTextAlignment(TEXT_ALIGN_LEFT); // emote-aware drawing is left-anchored; we center manually
     for (int r = rFirst; r < rEnd; r++) {
-        display->setFont(MOON_FONTS[s_moonRowFontIdx[r]]);
-        if (!s_moonRows[r].empty())
-            display->drawString(W / 2, rowY, s_moonRows[r].c_str());
-        rowY += moonFontH(s_moonRowFontIdx[r]);
+        const uint8_t f = s_moonRowFontIdx[r];
+        display->setFont(MOON_FONTS[f]);
+        if (!s_moonRows[r].empty()) {
+            int w = EmoteRenderer::measureStringWithEmotes(display, s_moonRows[r]);
+            int x0 = (W - w) / 2;
+            if (x0 < 2)
+                x0 = 2;
+            EmoteRenderer::drawStringWithEmotes(display, x0, rowY, s_moonRows[r], moonFontH(f) - 1, emotes, numEmotes);
+        }
+        rowY += s_moonRowH[r];
     }
 
     // Small moon accent, tucked in the top-left corner so it barely intrudes on the message.
     drawMoonAccent(display, 9, 9, 7);
 
-    // Tiny attribution (sender + time) bottom-right.
+    // Tiny attribution (sender + time) bottom-right. MOON_FONT_S so Cyrillic sender names render.
     if (s_moonAttr[0]) {
-        display->setFont(ArialMT_Plain_10);
+        display->setFont(MOON_FONT_S);
         display->setTextAlignment(TEXT_ALIGN_RIGHT);
         display->drawString(W - 2, H - tinyH, s_moonAttr);
     }
@@ -657,7 +709,7 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     if (pages > 1) {
         char pg[12];
         snprintf(pg, sizeof(pg), "%d/%d", page + 1, pages);
-        display->setFont(ArialMT_Plain_10);
+        display->setFont(MOON_FONT_S);
         int nameW = display->getStringWidth(owner.short_name);
         display->setTextAlignment(TEXT_ALIGN_RIGHT);
         display->drawString(W / 2 - nameW / 2 - 8, H - tinyH, pg);
