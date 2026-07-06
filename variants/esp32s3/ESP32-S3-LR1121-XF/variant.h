@@ -1,0 +1,37 @@
+// Button on NanoVHF PCB
+#define BUTTON_PIN 0
+
+// I2C via connectors on NanoVHF PCB
+#define I2C_SCL 13
+#define I2C_SDA 14
+
+// Screen (disabled)
+#define HAS_SCREEN 0
+
+// LoRa (LR1121)
+#define USE_LR1121
+
+#define LORA_DIO0 41
+#define LORA_DIO1 42
+#define LORA_DIO2 40
+#define LORA_DIO3 45
+#define LORA_DIO4 46
+
+#define LORA_CS   LORA_DIO1
+#define LORA_SCK  LORA_DIO2
+#define LORA_MOSI LORA_DIO3
+#define LORA_MISO LORA_DIO4
+
+#define LORA_INT   38
+#define LORA_RESET 39
+
+#define LR1121_BUSY_PIN   LORA_DIO0
+#define LR1121_IRQ_PIN    LORA_INT
+#define LR1121_NRESET_PIN LORA_RESET
+
+#define LR1121_SPI_NSS_PIN  LORA_CS
+#define LR1121_SPI_SCK_PIN  LORA_SCK
+#define LR1121_SPI_MOSI_PIN LORA_MOSI
+#define LR1121_SPI_MISO_PIN LORA_MISO
+#define LR11X0_DIO3_TCXO_VOLTAGE 1.8
+#define LR11X0_DIO_AS_RF_SWITCH
