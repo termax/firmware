@@ -10,6 +10,9 @@
 #include "gps/GeoCoord.h"
 #include "graphics/EmoteRenderer.h"
 #include "graphics/SharedUIDisplay.h"
+#ifdef MOONHUT_SIGN
+#include "graphics/draw/MessageRenderer.h" // moonSignShowingQr: sleep motif must keep off the code
+#endif
 #include "graphics/TimeFormatters.h"
 #include "graphics/images.h"
 #include "main.h"
@@ -1048,8 +1051,14 @@ void UIRenderer::drawScreensaverOverlay(OLEDDisplay *display, OLEDDisplayUiState
         snprintf(batt, sizeof(batt), "%u%%", powerStatus->getBatteryChargePercent());
         battW = display->getStringWidth(batt);
     }
-    const int16_t baseX = 2 + battW + 8;
-    const int16_t rowY = display->height() - 13;
+    int16_t baseX = 2 + battW + 8;
+    int16_t rowY = display->height() - 13;
+    if (graphics::MessageRenderer::moonSignShowingQr()) {
+        // QR mode: the code owns the left side full-height — sleep motif moves to the
+        // middle of the right-hand info column (caption above, service rows below).
+        baseX = display->width() - 44;
+        rowY = display->height() / 2;
+    }
     // Tiny crescent moon (ink circle, carved by a background circle)
     display->fillCircle(baseX + 5, rowY + 7, 5);
     display->setColor(BLACK);

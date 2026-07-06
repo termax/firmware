@@ -370,6 +370,12 @@ static inline bool moonFlashActive()
     return s_moonFlashMsg[0] && (int32_t)(millis() - s_moonFlashUntil) < 0;
 }
 
+bool moonSignShowingQr()
+{
+    const char *m = moonFlashActive() ? s_moonFlashMsg : s_moonMsg;
+    return strncmp(m, "qr:", 3) == 0;
+}
+
 bool moonSignNextPage()
 {
     if (moonFlashActive()) { // PRG dismisses a flash early
