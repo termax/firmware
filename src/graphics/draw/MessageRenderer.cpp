@@ -620,7 +620,10 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
 
     uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
     uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
-    bool ok = data[0] && qrcodegen_encodeText(data, tmp, qr, qrcodegen_Ecc_MEDIUM, 1, 6, qrcodegen_Mask_AUTO, true);
+    // ECC LOW (with boost) keeps the version — and thus module count — minimal, so each
+    // module gets the most pixels; on pristine high-contrast e-ink, damage tolerance is
+    // the least valuable thing to spend pixels on and camera-readability the most.
+    bool ok = data[0] && qrcodegen_encodeText(data, tmp, qr, qrcodegen_Ecc_LOW, 1, 6, qrcodegen_Mask_AUTO, true);
     if (!ok) {
         display->setFont(MOON_FONT_M);
         display->setTextAlignment(TEXT_ALIGN_CENTER);
@@ -628,16 +631,16 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
         return;
     }
 
+    // Use the FULL display height: the white paper around the code is the quiet zone.
     const int size = qrcodegen_getSize(qr);
-    const int avail = H - tinyH - 4;
-    int scale = avail / (size + 8); // reserve a ~4-module quiet zone on each side
+    int scale = H / size;
     if (scale < 2)
         scale = 2;
     const int qrPix = size * scale;
-    const int x0 = caption[0] ? 8 : (W - qrPix) / 2;
-    int y0 = (H - tinyH - qrPix) / 2;
-    if (y0 < 2)
-        y0 = 2;
+    const int x0 = caption[0] ? 4 : (W - qrPix) / 2;
+    int y0 = (H - qrPix) / 2;
+    if (y0 < 0)
+        y0 = 0;
 
     display->setColor(WHITE);
     for (int my = 0; my < size; my++)
@@ -652,7 +655,7 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
         moonWrapLine(display, caption, capW, MOON_MIN_FONT_IDX, rows);
         display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]);
         display->setTextAlignment(TEXT_ALIGN_LEFT);
-        int capY = (H - tinyH - (int)rows.size() * moonFontH(MOON_MIN_FONT_IDX)) / 2;
+        int capY = (H - (int)rows.size() * moonFontH(MOON_MIN_FONT_IDX)) / 2;
         if (capY < 2)
             capY = 2;
         for (const auto &r : rows) {
@@ -731,14 +734,9 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     {
         const char *activeMsg = flashActive ? s_moonFlashMsg : s_moonMsg;
         if (strncmp(activeMsg, "qr:", 3) == 0) {
+            // Dedicated fullscreen: no status row / attribution — every vertical pixel
+            // goes to the code (small screen, weak cameras). Caption column has the rest.
             drawMoonQrContent(display, activeMsg + 3, W, H, tinyH);
-            const char *attr = flashActive ? s_moonFlashAttr : s_moonAttr;
-            if (attr[0]) {
-                display->setFont(MOON_FONT_S);
-                display->setTextAlignment(TEXT_ALIGN_RIGHT);
-                display->drawString(W - 2, H - tinyH, attr);
-            }
-            drawMoonBottomRow(display, W, H, tinyH);
             return;
         }
     }
