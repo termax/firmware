@@ -8,6 +8,9 @@
 #include "UIRenderer.h"
 #include "gps/RTC.h"
 #include "graphics/EmoteRenderer.h"
+#ifdef MOONHUT_SIGN
+#include "graphics/qrcodegen.h" // vendored Nayuki QR generator (MIT) for the qr: sign mode
+#endif
 #include "graphics/Screen.h"
 #include "graphics/ScreenFonts.h"
 #include "graphics/SharedUIDisplay.h"
@@ -598,6 +601,67 @@ static void drawMoonBottomRow(OLEDDisplay *display, int W, int H, int tinyH)
     display->drawString(W / 2, H - tinyH, owner.short_name); // short name (4 chars) keeps the row uncrowded
 }
 
+// Render "qr:" payload (<data>|<caption>) as a QR code sized to the message area.
+// Dark modules are drawn in WHITE (= ink on this e-ink); quiet zone is untouched paper.
+// Version capped at 6 (41x41): at 2px/module it still fits the 122px screen and scans
+// at close range; longer payloads render an error instead of an unscannable code.
+static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, int H, int tinyH)
+{
+    char data[200];
+    char caption[80] = "";
+    strncpy(data, payload, sizeof(data) - 1);
+    data[sizeof(data) - 1] = '\0';
+    char *sep = strchr(data, '|');
+    if (sep) {
+        strncpy(caption, sep + 1, sizeof(caption) - 1);
+        caption[sizeof(caption) - 1] = '\0';
+        *sep = '\0';
+    }
+
+    uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
+    uint8_t tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
+    bool ok = data[0] && qrcodegen_encodeText(data, tmp, qr, qrcodegen_Ecc_MEDIUM, 1, 6, qrcodegen_Mask_AUTO, true);
+    if (!ok) {
+        display->setFont(MOON_FONT_M);
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(W / 2, (H - tinyH) / 2 - 10, "QR: data too long");
+        return;
+    }
+
+    const int size = qrcodegen_getSize(qr);
+    const int avail = H - tinyH - 4;
+    int scale = avail / (size + 8); // reserve a ~4-module quiet zone on each side
+    if (scale < 2)
+        scale = 2;
+    const int qrPix = size * scale;
+    const int x0 = caption[0] ? 8 : (W - qrPix) / 2;
+    int y0 = (H - tinyH - qrPix) / 2;
+    if (y0 < 2)
+        y0 = 2;
+
+    display->setColor(WHITE);
+    for (int my = 0; my < size; my++)
+        for (int mx = 0; mx < size; mx++)
+            if (qrcodegen_getModule(qr, mx, my))
+                display->fillRect(x0 + mx * scale, y0 + my * scale, scale, scale);
+
+    if (caption[0]) {
+        const int capX = x0 + qrPix + 8;
+        const int capW = W - capX - 4;
+        std::vector<std::string> rows;
+        moonWrapLine(display, caption, capW, MOON_MIN_FONT_IDX, rows);
+        display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]);
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        int capY = (H - tinyH - (int)rows.size() * moonFontH(MOON_MIN_FONT_IDX)) / 2;
+        if (capY < 2)
+            capY = 2;
+        for (const auto &r : rows) {
+            display->drawString(capX, capY, r.c_str());
+            capY += moonFontH(MOON_MIN_FONT_IDX);
+        }
+    }
+}
+
 static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
 {
     hasUnreadMessage = false;
@@ -660,6 +724,24 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     // Decide which text owns the screen: an active flash (DM / other-channel message)
     // temporarily overlays the persistent MoonPaper message, then it comes back.
     const bool flashActive = moonFlashActive();
+
+    // QR mode (POC for the dynamic-QR project): a message of the form "qr:<data>|<caption>"
+    // renders as a scannable QR code instead of text. Works for both the persistent sign
+    // message and flashes; paging never applies.
+    {
+        const char *activeMsg = flashActive ? s_moonFlashMsg : s_moonMsg;
+        if (strncmp(activeMsg, "qr:", 3) == 0) {
+            drawMoonQrContent(display, activeMsg + 3, W, H, tinyH);
+            const char *attr = flashActive ? s_moonFlashAttr : s_moonAttr;
+            if (attr[0]) {
+                display->setFont(MOON_FONT_S);
+                display->setTextAlignment(TEXT_ALIGN_RIGHT);
+                display->drawString(W - 2, H - tinyH, attr);
+            }
+            drawMoonBottomRow(display, W, H, tinyH);
+            return;
+        }
+    }
 
     // (Re)layout when a new message arrived OR the flash/persistent source changed
     if (s_moonDirty || flashActive != s_moonLayoutIsFlash) {
