@@ -605,8 +605,9 @@ static void drawMoonBottomRow(OLEDDisplay *display, int W, int H, int tinyH)
 // Dark modules are drawn in WHITE (= ink on this e-ink); quiet zone is untouched paper.
 // Version capped at 6 (41x41): at 2px/module it still fits the 122px screen and scans
 // at close range; longer payloads render an error instead of an unscannable code.
-static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, int H, int tinyH)
+static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, int H, const char *attr)
 {
+    const int tinyH = 13; // for the too-long error placement only
     char data[200];
     char caption[80] = "";
     strncpy(data, payload, sizeof(data) - 1);
@@ -632,12 +633,14 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
     }
 
     // Use the FULL display height: the white paper around the code is the quiet zone.
+    // QR full-height on the left; caption + service info (sender/time, battery, name)
+    // stack in the leftover right-hand column, so no vertical pixel is taken from the code.
     const int size = qrcodegen_getSize(qr);
     int scale = H / size;
     if (scale < 2)
         scale = 2;
     const int qrPix = size * scale;
-    const int x0 = caption[0] ? 4 : (W - qrPix) / 2;
+    const int x0 = 4;
     int y0 = (H - qrPix) / 2;
     if (y0 < 0)
         y0 = 0;
@@ -648,19 +651,37 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
             if (qrcodegen_getModule(qr, mx, my))
                 display->fillRect(x0 + mx * scale, y0 + my * scale, scale, scale);
 
-    if (caption[0]) {
-        const int capX = x0 + qrPix + 8;
-        const int capW = W - capX - 4;
+    const int colX = x0 + qrPix + 8;
+    const int colW = W - colX - 2;
+    const int rowH = moonFontH(MOON_MIN_FONT_IDX);
+    display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]);
+    display->setTextAlignment(TEXT_ALIGN_LEFT);
+
+    // Caption at the top of the column
+    int colY = 2;
+    if (caption[0] && colW > 20) {
         std::vector<std::string> rows;
-        moonWrapLine(display, caption, capW, MOON_MIN_FONT_IDX, rows);
-        display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]);
-        display->setTextAlignment(TEXT_ALIGN_LEFT);
-        int capY = (H - (int)rows.size() * moonFontH(MOON_MIN_FONT_IDX)) / 2;
-        if (capY < 2)
-            capY = 2;
+        moonWrapLine(display, caption, colW, MOON_MIN_FONT_IDX, rows);
         for (const auto &r : rows) {
-            display->drawString(capX, capY, r.c_str());
-            capY += moonFontH(MOON_MIN_FONT_IDX);
+            if (colY + rowH > H - 2 * rowH) // leave room for the service rows
+                break;
+            display->drawString(colX, colY, r.c_str());
+            colY += rowH;
+        }
+    }
+
+    // Service rows pinned to the column bottom: attribution, then battery + name
+    if (colW > 20) {
+        int svcY = H - rowH - 1;
+        char status[24];
+        if (powerStatus && powerStatus->getHasBattery())
+            snprintf(status, sizeof(status), "%u%%  %s", powerStatus->getBatteryChargePercent(), owner.short_name);
+        else
+            snprintf(status, sizeof(status), "%s", owner.short_name);
+        display->drawString(colX, svcY, status);
+        if (attr && attr[0]) {
+            svcY -= rowH;
+            display->drawString(colX, svcY, attr);
         }
     }
 }
@@ -734,9 +755,9 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     {
         const char *activeMsg = flashActive ? s_moonFlashMsg : s_moonMsg;
         if (strncmp(activeMsg, "qr:", 3) == 0) {
-            // Dedicated fullscreen: no status row / attribution — every vertical pixel
-            // goes to the code (small screen, weak cameras). Caption column has the rest.
-            drawMoonQrContent(display, activeMsg + 3, W, H, tinyH);
+            // Dedicated layout: QR owns the full height on the left; caption and the
+            // service info (attribution, battery, name) live in the right-hand column.
+            drawMoonQrContent(display, activeMsg + 3, W, H, flashActive ? s_moonFlashAttr : s_moonAttr);
             return;
         }
     }
