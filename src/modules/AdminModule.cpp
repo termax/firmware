@@ -863,6 +863,15 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c)
     case meshtastic_Config_bluetooth_tag:
         LOG_INFO("Set config: Bluetooth");
         config.has_bluetooth = true;
+#if defined(ARCH_ESP32) && !defined(CONFIG_IDF_TARGET_ESP32S2)
+        // MoonHut: disabling bluetooth clears the BLE bond table. The table holds only
+        // CONFIG_BT_NIMBLE_MAX_BONDS entries, every phone forget+re-pair burns a slot,
+        // and stock firmware never clears it (clearBonds() is dead code upstream) —
+        // stale bonds are why iOS pairing keeps breaking. This wiring gives a remote
+        // admin bond reset: set bluetooth.enabled false, then true again.
+        if (config.bluetooth.enabled && !c.payload_variant.bluetooth.enabled && nimbleBluetooth)
+            nimbleBluetooth->clearBonds();
+#endif
         config.bluetooth = c.payload_variant.bluetooth;
         break;
     case meshtastic_Config_security_tag:
