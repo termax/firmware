@@ -607,6 +607,208 @@ static void drawMoonBottomRow(OLEDDisplay *display, int W, int H, int tinyH)
     display->drawString(W / 2, H - tinyH, owner.short_name); // short name (4 chars) keeps the row uncrowded
 }
 
+// ---- Mega mode: very short messages (a character or few, incl. emoji) scale up to
+// fill the whole message area instead of sitting small in the middle. Glyph and emote
+// bitmaps are read directly and drawn as integer-scaled pixel blocks (QR-style).
+
+// UTF-8 -> font-table glyph index (mirrors Screen::customFontTableLookup incl. the
+// OLED_RU Cyrillic mapping) — mega mode draws glyphs straight from the font data.
+static size_t moonUtf8Glyph(const std::string &s, size_t i, uint8_t &glyphOut)
+{
+    uint8_t c = (uint8_t)s[i];
+    if (c < 0x80) {
+        glyphOut = c;
+        return 1;
+    }
+    if (i + 1 >= s.size()) {
+        glyphOut = 0;
+        return 1;
+    }
+    uint8_t d = (uint8_t)s[i + 1];
+    if (c == 0xC2) {
+        glyphOut = d;
+        return 2;
+    }
+    if (c == 0xC3) {
+        glyphOut = d | 0xC0;
+        return 2;
+    }
+#ifdef OLED_RU
+    if (c == 0xD0) {
+        if (d == 132) glyphOut = 170;      // Є
+        else if (d == 134) glyphOut = 178; // І
+        else if (d == 135) glyphOut = 175; // Ї
+        else if (d == 129) glyphOut = 168; // Ё
+        else if (d > 143 && d < 192) glyphOut = d + 48;
+        else glyphOut = 0;
+        return 2;
+    }
+    if (c == 0xD1) {
+        if (d == 148) glyphOut = 186;      // є
+        else if (d == 150) glyphOut = 179; // і
+        else if (d == 151) glyphOut = 191; // ї
+        else if (d == 145) glyphOut = 184; // ё
+        else if (d > 127 && d < 144) glyphOut = d + 112;
+        else glyphOut = 0;
+        return 2;
+    }
+    if (c == 0xD2) {
+        if (d == 144) glyphOut = 165;      // Ґ
+        else if (d == 145) glyphOut = 180; // ґ
+        else glyphOut = 0;
+        return 2;
+    }
+#endif
+    glyphOut = 0;
+    return (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+}
+
+// ThingPulse font layout: [maxW, height, firstChar, count][jump 4B/char][column-major data,
+// bytes per column = ceil(height/8), LSB = top of each 8-row page].
+static bool moonGlyphInfo(const uint8_t *font, uint8_t glyph, uint16_t &dataOff, uint8_t &sizeB, uint8_t &gw)
+{
+    uint8_t first = pgm_read_byte(font + 2);
+    uint8_t count = pgm_read_byte(font + 3);
+    if (glyph < first || (uint16_t)glyph >= (uint16_t)first + count)
+        return false;
+    uint16_t idx = 4 + (glyph - first) * 4;
+    uint8_t msb = pgm_read_byte(font + idx), lsb = pgm_read_byte(font + idx + 1);
+    sizeB = pgm_read_byte(font + idx + 2);
+    gw = pgm_read_byte(font + idx + 3);
+    if (msb == 0xFF && lsb == 0xFF) {
+        sizeB = 0; // no ink (e.g. space) — advance only
+        dataOff = 0;
+        return true;
+    }
+    dataOff = 4 + count * 4 + ((msb << 8) | lsb);
+    return true;
+}
+
+// Rows of the glyph that actually contain ink; false if blank (space)
+static bool moonGlyphInk(const uint8_t *font, uint8_t glyph, int &top, int &bot)
+{
+    uint16_t off;
+    uint8_t sizeB, gw;
+    if (!moonGlyphInfo(font, glyph, off, sizeB, gw) || sizeB == 0)
+        return false;
+    const int fh = pgm_read_byte(font + 1);
+    const int bpc = (fh + 7) / 8;
+    top = fh;
+    bot = -1;
+    for (int col = 0; col < gw; col++)
+        for (int row = 0; row < fh; row++) {
+            int bi = col * bpc + row / 8;
+            if (bi < sizeB && (pgm_read_byte(font + off + bi) >> (row % 8)) & 1) {
+                if (row < top)
+                    top = row;
+                if (row > bot)
+                    bot = row;
+            }
+        }
+    return bot >= 0;
+}
+
+static void moonDrawScaledGlyph(OLEDDisplay *display, const uint8_t *font, uint8_t glyph, int x, int y, int scale)
+{
+    uint16_t off;
+    uint8_t sizeB, gw;
+    if (!moonGlyphInfo(font, glyph, off, sizeB, gw) || sizeB == 0)
+        return;
+    const int fh = pgm_read_byte(font + 1);
+    const int bpc = (fh + 7) / 8;
+    for (int col = 0; col < gw; col++)
+        for (int row = 0; row < fh; row++) {
+            int bi = col * bpc + row / 8;
+            if (bi < sizeB && (pgm_read_byte(font + off + bi) >> (row % 8)) & 1)
+                display->fillRect(x + col * scale, y + row * scale, scale, scale);
+        }
+}
+
+// XBM emote bitmap: row-major, LSB-first, rows padded to whole bytes
+static void moonDrawScaledEmote(OLEDDisplay *display, const Emote *e, int x, int y, int scale)
+{
+    const int bpr = (e->width + 7) / 8;
+    for (int row = 0; row < e->height; row++)
+        for (int col = 0; col < e->width; col++)
+            if ((pgm_read_byte(e->bitmap + row * bpr + col / 8) >> (col % 8)) & 1)
+                display->fillRect(x + col * scale, y + row * scale, scale, scale);
+}
+
+#define MOON_MEGA_MAX_ITEMS 6
+
+static bool moonMegaRender(OLEDDisplay *display, const std::string &row, int W, int msgTop, int areaH)
+{
+    struct Item {
+        const Emote *emote;
+        uint8_t glyph;
+        uint8_t gw;      // advance width at base scale
+        int inkTop, inkBot; // glyph ink bounds (emotes: 0..h-1)
+    };
+    Item items[MOON_MEGA_MAX_ITEMS];
+    int n = 0;
+    const uint8_t *font = moonNeedsLocalizedFont(row) ? MOON_FONTS[1] : MOON_FONTS[0];
+
+    size_t i = 0;
+    while (i < row.size()) {
+        size_t ml = 0;
+        const Emote *e = EmoteRenderer::findEmoteAt(row, i, ml);
+        if (e && ml > 0) {
+            if (n >= MOON_MEGA_MAX_ITEMS)
+                return false;
+            items[n++] = {e, 0, (uint8_t)e->width, 0, e->height - 1};
+            i += ml;
+            continue;
+        }
+        uint8_t g = 0;
+        size_t adv = moonUtf8Glyph(row, i, g);
+        i += adv;
+        if (!g || g == ' ')
+            continue; // spaces between few glyphs just waste mega pixels
+        if (n >= MOON_MEGA_MAX_ITEMS)
+            return false;
+        uint16_t off;
+        uint8_t sizeB, gw;
+        if (!moonGlyphInfo(font, g, off, sizeB, gw))
+            continue;
+        int t, b;
+        if (!moonGlyphInk(font, g, t, b))
+            continue;
+        items[n++] = {nullptr, g, gw, t, b};
+    }
+    if (n == 0)
+        return false;
+
+    // Shared ink band across items -> scale to fill it, trimmed of blank font rows
+    int bandTop = 1000, bandBot = -1, baseW = 0;
+    for (int k = 0; k < n; k++) {
+        bandTop = std::min(bandTop, items[k].inkTop);
+        bandBot = std::max(bandBot, items[k].inkBot);
+        baseW += items[k].gw + 1;
+    }
+    baseW -= 1;
+    const int bandH = bandBot - bandTop + 1;
+    if (baseW <= 0 || bandH <= 0)
+        return false;
+    int scale = std::min((W - 8) / baseW, areaH / bandH);
+    if (scale < 2)
+        return false; // not meaningfully bigger than the normal render — use the text path
+
+    display->setColor(WHITE);
+    int x = (W - baseW * scale) / 2;
+    const int bandY = msgTop + (areaH - bandH * scale) / 2;
+    for (int k = 0; k < n; k++) {
+        if (items[k].emote) {
+            // center the emote within the band
+            int ey = bandY + (bandH - items[k].emote->height) * scale / 2;
+            moonDrawScaledEmote(display, items[k].emote, x, ey, scale);
+        } else {
+            moonDrawScaledGlyph(display, font, items[k].glyph, x, bandY - bandTop * scale, scale);
+        }
+        x += (items[k].gw + 1) * scale;
+    }
+    return true;
+}
+
 // Render "qr:" payload (<data>|<caption>) as a QR code sized to the message area.
 // Dark modules are drawn in WHITE (= ink on this e-ink); quiet zone is untouched paper.
 // Version capped at 6 (41x41): at 2px/module it still fits the 122px screen and scans
@@ -825,26 +1027,33 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     for (int r = rFirst; r < rEnd; r++)
         blockH += s_moonRowH[r];
 
-    // Single page: vertically centered as before. Multi-page: top-aligned for stable reading.
-    int rowY = (pages == 1) ? msgTop + (msgAreaH - blockH) / 2 : msgTop;
-    if (rowY < msgTop)
-        rowY = msgTop;
-    display->setTextAlignment(TEXT_ALIGN_LEFT); // emote-aware drawing is left-anchored; we center manually
-    for (int r = rFirst; r < rEnd; r++) {
-        const uint8_t f = s_moonRowFontIdx[r];
-        display->setFont(MOON_FONTS[f]);
-        if (!s_moonRows[r].empty()) {
-            int w = EmoteRenderer::measureStringWithEmotes(display, s_moonRows[r]);
-            int x0 = (W - w) / 2;
-            if (x0 < 2)
-                x0 = 2;
-            EmoteRenderer::drawStringWithEmotes(display, x0, rowY, s_moonRows[r], moonFontH(f) - 1, emotes, numEmotes);
-        }
-        rowY += s_moonRowH[r];
-    }
+    // Mega mode: a single short row (a character or few, incl. emoji) fills the whole
+    // message area as scaled pixel-block glyphs instead of sitting small in the middle.
+    const bool mega = (pages == 1 && s_moonRows.size() == 1 && !s_moonRows[0].empty()) &&
+                      moonMegaRender(display, s_moonRows[0], W, msgTop, msgAreaH);
 
-    // Small moon accent, tucked in the top-left corner so it barely intrudes on the message.
-    drawMoonAccent(display, 9, 9, 7);
+    if (!mega) {
+        // Single page: vertically centered as before. Multi-page: top-aligned for stable reading.
+        int rowY = (pages == 1) ? msgTop + (msgAreaH - blockH) / 2 : msgTop;
+        if (rowY < msgTop)
+            rowY = msgTop;
+        display->setTextAlignment(TEXT_ALIGN_LEFT); // emote-aware drawing is left-anchored; we center manually
+        for (int r = rFirst; r < rEnd; r++) {
+            const uint8_t f = s_moonRowFontIdx[r];
+            display->setFont(MOON_FONTS[f]);
+            if (!s_moonRows[r].empty()) {
+                int w = EmoteRenderer::measureStringWithEmotes(display, s_moonRows[r]);
+                int x0 = (W - w) / 2;
+                if (x0 < 2)
+                    x0 = 2;
+                EmoteRenderer::drawStringWithEmotes(display, x0, rowY, s_moonRows[r], moonFontH(f) - 1, emotes, numEmotes);
+            }
+            rowY += s_moonRowH[r];
+        }
+
+        // Small moon accent, tucked in the top-left corner so it barely intrudes on the message.
+        drawMoonAccent(display, 9, 9, 7);
+    }
 
     // Tiny attribution (sender + time) bottom-right; a flash shows its own (prefixed) one.
     const char *attr = flashActive ? s_moonFlashAttr : s_moonAttr;
