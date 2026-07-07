@@ -836,6 +836,11 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
         strncpy(caption, cap, sizeof(caption) - 1);
         caption[sizeof(caption) - 1] = '\0';
         *sep = '\0';
+        // A third segment ("qr:<data>|<caption>|<ackid>") is the rotation script's ack id —
+        // TextMessageModule answers it; it must never render as part of the caption.
+        char *idsep = strchr(caption, '|');
+        if (idsep)
+            *idsep = '\0';
     }
     // Trim trailing whitespace/newlines from the data — they'd silently corrupt the QR
     for (int e = (int)strlen(data) - 1; e >= 0 && (data[e] == ' ' || data[e] == '\n' || data[e] == '\r'); e--)

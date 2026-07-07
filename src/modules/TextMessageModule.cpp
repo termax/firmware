@@ -89,6 +89,25 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
         e.action = UIFrameEvent::Action::SWITCH_TO_TEXTMESSAGE;
         screen->handleUIFrameEvent(&e); // jump to the sign frame (drawTextMessageFrame renders it) + fast refresh
 
+        // Render confirmation for the QR rotation pipeline: "qr:<data>|<caption>|<ackid>"
+        // gets a "qr-ok:<ackid>" DM back to the sender (or "qr-err:" if the payload can't
+        // encode), so the rotation script can retry on silence. No ackid = no reply, so
+        // manual sends stay quiet. "qr-ok:" itself never matches the qr: prefix (no loop).
+        if ((text[0] == 'q' || text[0] == 'Q') && (text[1] == 'r' || text[1] == 'R') && text[2] == ':') {
+            const char *p1 = strchr(text + 3, '|');
+            const char *p2 = p1 ? strchr(p1 + 1, '|') : nullptr;
+            if (p2 && p2[1]) {
+                const size_t dataLen = (size_t)(p1 - (text + 3));
+                const bool fits = dataLen > 0 && dataLen <= 134; // QR v6 byte-mode capacity at ECC LOW
+                meshtastic_MeshPacket *reply = allocDataPacket();
+                reply->to = mp.from;
+                reply->decoded.payload.size = snprintf((char *)reply->decoded.payload.bytes,
+                                                       sizeof(reply->decoded.payload.bytes), "qr-%s:%s",
+                                                       fits ? "ok" : "err", p2 + 1);
+                service->sendToMesh(reply, RX_SRC_LOCAL, false);
+            }
+        }
+
 #ifdef LED_POWER
         // Attention blink for the sign message and DMs; a brief public-channel flash stays silent.
         if (moonKind != MOON_FLASH_PUB) {
