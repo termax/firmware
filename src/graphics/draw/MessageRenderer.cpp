@@ -844,7 +844,7 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
     if (!data[0]) {
         display->setFont(MOON_FONT_M);
         display->setTextAlignment(TEXT_ALIGN_CENTER);
-        display->drawString(W / 2, (H - tinyH) / 2 - 10, "QR: empty data");
+        display->drawString(W / 4, (H - tinyH) / 2 - 10, "QR: empty data");
         return;
     }
 
@@ -857,30 +857,35 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
     if (!ok) {
         display->setFont(MOON_FONT_M);
         display->setTextAlignment(TEXT_ALIGN_CENTER);
-        display->drawString(W / 2, (H - tinyH) / 2 - 10, "QR: data too long");
+        display->drawString(W / 4, (H - tinyH) / 2 - 10, "QR: data too long");
         return;
     }
 
-    // Use the FULL display height: the white paper around the code is the quiet zone.
-    // QR full-height on the left; caption + service info (sender/time, battery, name)
-    // stack in the leftover right-hand column, so no vertical pixel is taken from the code.
+    // Fixed two-pane layout (stable across QR sizes — nothing ever jumps):
+    // LEFT half = dedicated QR zone, any-version code centered inside it; divider line
+    // down the middle; RIGHT half = info zone at a fixed anchor (caption top, service
+    // rows pinned to the bottom). The white paper of the pane is the quiet zone.
+    const int paneW = W / 2;
     const int size = qrcodegen_getSize(qr);
-    int scale = H / size;
+    int scale = std::min((paneW - 4) / size, H / size);
     if (scale < 2)
         scale = 2;
     const int qrPix = size * scale;
-    const int x0 = 4;
+    int x0 = (paneW - qrPix) / 2;
+    if (x0 < 0)
+        x0 = 0;
     int y0 = (H - qrPix) / 2;
     if (y0 < 0)
         y0 = 0;
 
     display->setColor(WHITE);
+    display->drawLine(paneW, 0, paneW, H - 1); // pane divider
     for (int my = 0; my < size; my++)
         for (int mx = 0; mx < size; mx++)
             if (qrcodegen_getModule(qr, mx, my))
                 display->fillRect(x0 + mx * scale, y0 + my * scale, scale, scale);
 
-    const int colX = x0 + qrPix + 8;
+    const int colX = paneW + 6; // FIXED anchor — independent of the QR's rendered size
     const int colW = W - colX - 2;
     const int rowH = moonFontH(MOON_MIN_FONT_IDX);
     display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]);
