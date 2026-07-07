@@ -370,10 +370,16 @@ static inline bool moonFlashActive()
     return s_moonFlashMsg[0] && (int32_t)(millis() - s_moonFlashUntil) < 0;
 }
 
+// "qr:" prefix, case-insensitive (phones love to autocapitalize: Qr:/QR:/qR:)
+static inline bool moonIsQrMsg(const char *m)
+{
+    return m && (m[0] == 'q' || m[0] == 'Q') && (m[1] == 'r' || m[1] == 'R') && m[2] == ':';
+}
+
 bool moonSignShowingQr()
 {
     const char *m = moonFlashActive() ? s_moonFlashMsg : s_moonMsg;
-    return strncmp(m, "qr:", 3) == 0;
+    return moonIsQrMsg(m);
 }
 
 bool moonSignNextPage()
@@ -818,13 +824,28 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
     const int tinyH = 13; // for the too-long error placement only
     char data[200];
     char caption[80] = "";
+    while (*payload == ' ')
+        payload++; // "qr: https://..." — phones love inserting a space after the colon
     strncpy(data, payload, sizeof(data) - 1);
     data[sizeof(data) - 1] = '\0';
     char *sep = strchr(data, '|');
     if (sep) {
-        strncpy(caption, sep + 1, sizeof(caption) - 1);
+        const char *cap = sep + 1;
+        while (*cap == ' ')
+            cap++;
+        strncpy(caption, cap, sizeof(caption) - 1);
         caption[sizeof(caption) - 1] = '\0';
         *sep = '\0';
+    }
+    // Trim trailing whitespace/newlines from the data — they'd silently corrupt the QR
+    for (int e = (int)strlen(data) - 1; e >= 0 && (data[e] == ' ' || data[e] == '\n' || data[e] == '\r'); e--)
+        data[e] = '\0';
+
+    if (!data[0]) {
+        display->setFont(MOON_FONT_M);
+        display->setTextAlignment(TEXT_ALIGN_CENTER);
+        display->drawString(W / 2, (H - tinyH) / 2 - 10, "QR: empty data");
+        return;
     }
 
     uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(6)];
@@ -832,7 +853,7 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
     // ECC LOW (with boost) keeps the version — and thus module count — minimal, so each
     // module gets the most pixels; on pristine high-contrast e-ink, damage tolerance is
     // the least valuable thing to spend pixels on and camera-readability the most.
-    bool ok = data[0] && qrcodegen_encodeText(data, tmp, qr, qrcodegen_Ecc_LOW, 1, 6, qrcodegen_Mask_AUTO, true);
+    bool ok = qrcodegen_encodeText(data, tmp, qr, qrcodegen_Ecc_LOW, 1, 6, qrcodegen_Mask_AUTO, true);
     if (!ok) {
         display->setFont(MOON_FONT_M);
         display->setTextAlignment(TEXT_ALIGN_CENTER);
@@ -873,7 +894,8 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
         for (const auto &r : rows) {
             if (colY + rowH > H - 2 * rowH) // leave room for the service rows
                 break;
-            display->drawString(colX, colY, r.c_str());
+            // emote-aware so an emoji in the caption renders as a bitmap, not mojibake
+            EmoteRenderer::drawStringWithEmotes(display, colX, colY, r, rowH - 1, emotes, numEmotes);
             colY += rowH;
         }
     }
@@ -962,7 +984,7 @@ static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
     // message and flashes; paging never applies.
     {
         const char *activeMsg = flashActive ? s_moonFlashMsg : s_moonMsg;
-        if (strncmp(activeMsg, "qr:", 3) == 0) {
+        if (moonIsQrMsg(activeMsg)) {
             // Dedicated layout: QR owns the full height on the left; caption and the
             // service info (attribution, battery, name) live in the right-hand column.
             drawMoonQrContent(display, activeMsg + 3, W, H, flashActive ? s_moonFlashAttr : s_moonAttr);
