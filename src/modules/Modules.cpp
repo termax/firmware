@@ -39,6 +39,9 @@
 #endif
 #include "modules/RoutingModule.h"
 #include "modules/TextMessageModule.h"
+#ifdef MOONHUT_TRACKER
+#include "modules/MoonTrackModule.h"
+#endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
 #include "modules/TraceRouteModule.h"
 #endif
@@ -134,6 +137,9 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_TEXTMESSAGE
     textMessageModule = new TextMessageModule();
+#endif
+#ifdef MOONHUT_TRACKER
+    moonTrackModule = new MoonTrackModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_TRACEROUTE
     traceRouteModule = new TraceRouteModule();
