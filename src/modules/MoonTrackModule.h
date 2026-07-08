@@ -60,6 +60,19 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     int retries = 0;
 
     uint32_t presenceSince = 0; // millis when gateway first heard in current streak
+
+    // Parked/riding power state machine (P5): parked = GPS off + periodic peek.
+    // Light sleep comes from provisioning (is_power_saving=true, role CLIENT).
+    enum PowerMode { RIDING, PARKED, PEEKING };
+    PowerMode mode = RIDING;
+    uint32_t lastMoveMs = 0;
+    uint32_t parkedCycleMs = 0;
+    uint32_t peekStartMs = 0;
+    int32_t parkLat = 0, parkLon = 0;
+    void powerTick();
+    void toRiding();
+    void toParked();
+    void sendHeartbeat();
 };
 
 extern MoonTrackModule *moonTrackModule;

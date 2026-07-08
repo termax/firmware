@@ -6,6 +6,7 @@
 #include "MeshService.h"
 #include "NodeDB.h"
 #include "airtime.h"
+#include "gps/GPS.h"
 #include "gps/RTC.h"
 #include <cmath>
 #include <cstring>
@@ -30,6 +31,10 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define MAX_RETRIES 2
 #define LOG_COMPACT_BYTES (1024 * 1024)
 #define DP_EPSILON_M 20.0
+#define PARK_AFTER_MS (10 * 60 * 1000UL)  // no movement this long -> parked
+#define PEEK_EVERY_MS (15 * 60 * 1000UL)  // parked GPS peek cadence
+#define PEEK_TIMEOUT_MS (120 * 1000UL)    // give up waiting for a fix
+#define UNPARK_DIST_M 50.0                // moved this far from parking spot -> riding
 
 MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
@@ -98,6 +103,80 @@ void MoonTrackModule::maybeRecord()
         lastLat = lat;
         lastLon = lon;
         lastRecTime = now;
+        if (moved)
+            lastMoveMs = millis();
+    }
+}
+
+// ---- parked/riding power state machine ------------------------------------
+
+void MoonTrackModule::toRiding()
+{
+    if (gps)
+        gps->enable();
+    mode = RIDING;
+    lastMoveMs = millis();
+    LOG_INFO("MoonTrack: RIDING");
+}
+
+void MoonTrackModule::toParked()
+{
+    parkLat = lastLat;
+    parkLon = lastLon;
+    if (gps)
+        gps->disable(); // biggest single parked saving (~30-40mA); radio keeps listening
+    mode = PARKED;
+    parkedCycleMs = millis();
+    LOG_INFO("MoonTrack: PARKED");
+}
+
+void MoonTrackModule::sendHeartbeat()
+{
+    // Theft canary: tiny port-260 beacon each parked peek; silence = jammed/gone
+    meshtastic_MeshPacket *p = allocDataPacket();
+    p->to = NODENUM_BROADCAST;
+    p->decoded.payload.bytes[0] = 'T';
+    p->decoded.payload.bytes[1] = 'H';
+    p->decoded.payload.size = 2;
+    service->sendToMesh(p, RX_SRC_LOCAL, false);
+}
+
+void MoonTrackModule::powerTick()
+{
+    switch (mode) {
+    case RIDING:
+        if (lastMoveMs && (millis() - lastMoveMs) > PARK_AFTER_MS)
+            toParked();
+        break;
+    case PARKED:
+        if ((millis() - parkedCycleMs) > PEEK_EVERY_MS) {
+            if (gps)
+                gps->enable();
+            mode = PEEKING;
+            peekStartMs = millis();
+        }
+        break;
+    case PEEKING: {
+        bool timeout = (millis() - peekStartMs) > PEEK_TIMEOUT_MS;
+        if (gpsStatus && gpsStatus->getHasLock()) {
+            double dLat = (gpsStatus->getLatitude() - parkLat) * 1e-7 * 111320.0;
+            double dLon = (gpsStatus->getLongitude() - parkLon) * 1e-7 * 111320.0 *
+                          cos(parkLat * 1e-7 * M_PI / 180.0);
+            if (sqrt(dLat * dLat + dLon * dLon) > UNPARK_DIST_M) {
+                toRiding();
+                return;
+            }
+            timeout = true; // got a fix, still parked — wrap up the peek
+        }
+        if (timeout) {
+            sendHeartbeat();
+            if (gps)
+                gps->disable();
+            mode = PARKED;
+            parkedCycleMs = millis();
+        }
+        break;
+    }
     }
 }
 
@@ -259,6 +338,7 @@ ProcessMessage MoonTrackModule::handleReceived(const meshtastic_MeshPacket &mp)
 int32_t MoonTrackModule::runOnce()
 {
     maybeRecord();
+    powerTick();
     syncTick();
     return 15 * 1000;
 }
