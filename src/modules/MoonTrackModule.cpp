@@ -24,7 +24,7 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define PRESENCE_WINDOW_S 600
 #define PRESENCE_STABLE_MS 120000
 #define CHUTIL_MAX 25.0f
-#define RECS_PER_PKT 14
+#define RECS_PER_PKT 14 // 8B header (TKsc + origin u32) + 14*16B = 232B
 #define MAX_BATCH 512
 #define CHUNK_GAP_MS 30000
 #define ACK_TIMEOUT_MS 60000
@@ -270,8 +270,12 @@ void MoonTrackModule::sendChunk()
     b[1] = 'K';
     b[2] = ++seqInFlight;
     b[3] = (uint8_t)count;
-    memcpy(b + 4, &batch[batchNext], count * REC_SZ);
-    p->decoded.payload.size = 4 + count * REC_SZ;
+    // v2-ready header: origin nodeid — with gossip mules, sender != track owner.
+    // For own data origin == us; a future mule fills in the cargo's true origin.
+    uint32_t origin = nodeDB->getNodeNum();
+    memcpy(b + 4, &origin, 4);
+    memcpy(b + 8, &batch[batchNext], count * REC_SZ);
+    p->decoded.payload.size = 8 + count * REC_SZ;
     service->sendToMesh(p, RX_SRC_LOCAL, false);
     awaitingAck = true;
     lastSendMs = millis();
