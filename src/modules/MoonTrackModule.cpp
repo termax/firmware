@@ -23,8 +23,8 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define GATEWAY_NODE 0x62ec2a74 // WSMX — hearing home is what makes syncing possible
 #define PRESENCE_WINDOW_S 600
 #define PRESENCE_STABLE_MS 120000
-#define CHUTIL_MAX 25.0f
-#define RECS_PER_PKT 14 // 8B header (TKsc + origin u32) + 14*16B = 232B
+#define CHUTIL_MAX 40.0f // 25 proved too shy on a chatty day; 1pkt/30s is the real limiter
+#define RECS_PER_PKT 10 // 168B payload — 232B rode the frame-size edge and vanished on air
 #define MAX_BATCH 512
 #define CHUNK_GAP_MS 30000
 #define ACK_TIMEOUT_MS 60000
@@ -40,6 +40,7 @@ MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
 {
     loadState();
+    lastMoveMs = millis(); // arm the park timer at boot — 0 meant "never park until first move"
     LOG_INFO("MoonTrack: log=%u bytes, synced=%u", (unsigned)logSize(), (unsigned)synced);
 }
 
@@ -82,7 +83,7 @@ void MoonTrackModule::maybeRecord()
         return;
     int32_t lat = gpsStatus->getLatitude();
     int32_t lon = gpsStatus->getLongitude();
-    uint32_t now = getValidTime(RTCQualityDevice, true);
+    uint32_t now = getValidTime(RTCQualityDevice, false) /* UTC — last_heard and record times must share the epoch */;
     if (now == 0)
         return; // no usable clock yet
 
@@ -184,9 +185,10 @@ void MoonTrackModule::powerTick()
 
 bool MoonTrackModule::gatewayHeard()
 {
-    meshtastic_NodeInfoLite *n = nodeDB->getMeshNode(GATEWAY_NODE);
-    uint32_t now = getValidTime(RTCQualityDevice, true);
-    bool heard = n && now && n->last_heard && (now - n->last_heard) < PRESENCE_WINDOW_S;
+    // Own bookkeeping (gwSeenMs, set on any port-260 packet from the gateway) — the
+    // nodedb's last_heard never updates for API-originated packets, which is ALL a
+    // quiet serial-gateway ever sends. Discovered the hard way (lastHeard=0 forever).
+    bool heard = gwSeenMs && (millis() - gwSeenMs) < (PRESENCE_WINDOW_S * 1000UL);
     if (!heard) {
         presenceSince = 0;
         return false;
@@ -285,8 +287,33 @@ void MoonTrackModule::sendChunk()
 void MoonTrackModule::syncTick()
 {
     if (batch.empty()) {
-        if (logSize() > synced && gatewayHeard() && airTime && airTime->channelUtilizationPercent() < CHUTIL_MAX)
-            loadBatch();
+        // Active presence probe: a quiet gateway may not transmit for long stretches,
+        // so passive listening starves. With a backlog and no recent contact, ASK —
+        // meshhub answers 'TP' probes, and the answer updates last_heard (= presence).
+        if (logSize() > synced && !gatewayHeard()) {
+            static uint32_t lastProbeMs = 0;
+            if (millis() - lastProbeMs > 120000) {
+                lastProbeMs = millis();
+                meshtastic_MeshPacket *p = allocDataPacket();
+                p->to = GATEWAY_NODE;
+                p->decoded.payload.bytes[0] = 'T';
+                p->decoded.payload.bytes[1] = 'P';
+                p->decoded.payload.size = 2;
+                service->sendToMesh(p, RX_SRC_LOCAL, false);
+                LOG_INFO("MoonTrack: probing gateway");
+            }
+        }
+        if (logSize() > synced && gatewayHeard() && airTime) {
+            if (airTime->channelUtilizationPercent() < CHUTIL_MAX) {
+                loadBatch();
+            } else {
+                static uint32_t lastYellMs = 0;
+                if (millis() - lastYellMs > 300000) { // yield visibly, not silently
+                    lastYellMs = millis();
+                    LOG_INFO("MoonTrack: sync yielding, chUtil=%.1f%%", airTime->channelUtilizationPercent());
+                }
+            }
+        }
         return;
     }
     if (awaitingAck) {
@@ -326,6 +353,8 @@ void MoonTrackModule::syncTick()
 
 ProcessMessage MoonTrackModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
+    if (mp.from == GATEWAY_NODE)
+        gwSeenMs = millis(); // presence proof: home spoke to us on our port
     auto &d = mp.decoded;
     if (d.payload.size >= 3 && d.payload.bytes[0] == 'T' && d.payload.bytes[1] == 'A' &&
         d.payload.bytes[2] == seqInFlight && awaitingAck) {
@@ -344,6 +373,13 @@ int32_t MoonTrackModule::runOnce()
     maybeRecord();
     powerTick();
     syncTick();
+    static uint32_t lastStateMs = 0;
+    if (millis() - lastStateMs > 60000) { // heartbeat state line for bench debugging
+        lastStateMs = millis();
+        LOG_INFO("MoonTrack: state log=%u synced=%u gwHeard=%d mode=%d batch=%u lock=%d",
+                 (unsigned)logSize(), (unsigned)synced, (int)gatewayHeard(), (int)mode,
+                 (unsigned)batch.size(), gpsStatus ? (int)gpsStatus->getHasLock() : -1);
+    }
     return 15 * 1000;
 }
 #endif
