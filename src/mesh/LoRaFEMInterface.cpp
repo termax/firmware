@@ -185,6 +185,45 @@ void LoRaFEMInterface::setRxModeEnableWhenMCUSleep(void)
 #endif
 }
 
+void LoRaFEMInterface::wakeFromMCUSleep(void)
+{
+    // Counterpart to setRxModeEnableWhenMCUSleep(). After LIGHT sleep, esp_light_sleep_start()
+    // returns WITHOUT a reboot, so the boot-time "release all RTC holds" loop in machineSetup()
+    // never runs. The FEM pin RTC holds latched before sleeping then persist, so the next
+    // setTxModeEnable() cannot drive the TX-select pin (GC1109 TX_EN / KCT8103L CTX) HIGH and the
+    // PA stays in bypass (~20 dB weak TX). Release the holds AND re-drive the pins as outputs so
+    // the PA works after a light-sleep wake. Deep sleep is unaffected (machineSetup() releases
+    // holds on the reboot). Verified on a KCT8103L V4: fixed light-sleep TX from -10 to +10 dB.
+#ifdef HELTEC_V4
+    rtc_gpio_hold_dis((gpio_num_t)LORA_PA_POWER);
+    if (fem_type == GC1109_PA) {
+        rtc_gpio_hold_dis((gpio_num_t)LORA_GC1109_PA_EN);
+        gpio_pulldown_dis((gpio_num_t)LORA_GC1109_PA_TX_EN);
+        pinMode(LORA_GC1109_PA_TX_EN, OUTPUT);
+        digitalWrite(LORA_GC1109_PA_EN, HIGH);   // CSD=1: chip enabled
+        digitalWrite(LORA_GC1109_PA_TX_EN, LOW); // RX/idle default; setTxModeEnable() re-asserts HIGH
+    } else if (fem_type == KCT8103L_PA) {
+        rtc_gpio_hold_dis((gpio_num_t)LORA_KCT8103L_PA_CSD);
+        rtc_gpio_hold_dis((gpio_num_t)LORA_KCT8103L_PA_CTX);
+        pinMode(LORA_KCT8103L_PA_CSD, OUTPUT);
+        pinMode(LORA_KCT8103L_PA_CTX, OUTPUT);
+        digitalWrite(LORA_KCT8103L_PA_CSD, HIGH);                        // chip enabled
+        digitalWrite(LORA_KCT8103L_PA_CTX, lna_enabled ? LOW : HIGH);    // RX default; setTxModeEnable re-asserts
+    }
+#elif defined(USE_GC1109_PA) && defined(ARCH_ESP32)
+    rtc_gpio_hold_dis((gpio_num_t)LORA_PA_POWER);
+    rtc_gpio_hold_dis((gpio_num_t)LORA_GC1109_PA_EN);
+    gpio_pulldown_dis((gpio_num_t)LORA_GC1109_PA_TX_EN);
+    pinMode(LORA_GC1109_PA_TX_EN, OUTPUT);
+    digitalWrite(LORA_GC1109_PA_EN, HIGH);
+    digitalWrite(LORA_GC1109_PA_TX_EN, LOW);
+#elif defined(USE_KCT8103L_PA) && defined(ARCH_ESP32)
+    rtc_gpio_hold_dis((gpio_num_t)LORA_PA_POWER);
+    rtc_gpio_hold_dis((gpio_num_t)LORA_KCT8103L_PA_CSD);
+    rtc_gpio_hold_dis((gpio_num_t)LORA_KCT8103L_PA_CTX);
+#endif
+}
+
 void LoRaFEMInterface::setLNAEnable(bool enabled)
 {
     lna_enabled = enabled;

@@ -494,6 +494,13 @@ esp_sleep_wakeup_cause_t doLightSleep(uint64_t sleepMsec) // FIXME, use a more r
     }
 #endif
 
+#if HAS_LORA_FEM
+    // Release the FEM pin holds/pulldown latched by enableLoraInterrupt() before this light
+    // sleep. Without this, TX_EN stays stuck LOW after wake and the PA transmits in bypass
+    // (~20 dB weak) — the light-sleep counterpart to the boot-time RTC-hold release.
+    loraFEMInterface.wakeFromMCUSleep();
+#endif
+
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     notifyLightSleepEnd.notifyObservers(cause); // Button interrupts are reattached here
 
