@@ -1536,6 +1536,11 @@ std::unique_ptr<GPS> GPS::createGps()
     int8_t _rx_gpio = config.position.rx_gpio;
     int8_t _tx_gpio = config.position.tx_gpio;
     int8_t _en_gpio = config.position.gps_en_gpio;
+    // A user-supplied enable pin (position.gps_en_gpio) drives the user's own circuit, which by
+    // convention is active-HIGH (standard N-channel). GPS_EN_ACTIVE describes only the ONBOARD
+    // enable circuit (e.g. Heltec V4's active-LOW P-channel MOSFET), so its polarity must NOT be
+    // applied to a user-overridden pin, otherwise enabling the GPS cuts power. See issue #8310.
+    const bool _en_gpio_user = (_en_gpio != 0);
 
 #if defined(GPS_RX_PIN)
     if (!_rx_gpio)
@@ -1570,7 +1575,7 @@ std::unique_ptr<GPS> GPS::createGps()
     if (_en_gpio) {
         GpioPin *p = new GpioHwPin(_en_gpio);
 
-        if (!GPS_EN_ACTIVE) { // Need to invert the pin before hardware
+        if (!GPS_EN_ACTIVE && !_en_gpio_user) { // invert only for the board's onboard EN circuit (see #8310)
             new GpioNotTransformer(
                 virtPin,
                 p); // We just leave this created object on the heap so it can stay watching virtPin and driving en_gpio
