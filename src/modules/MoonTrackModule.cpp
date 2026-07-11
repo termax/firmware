@@ -32,9 +32,14 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define LOG_COMPACT_BYTES (1024 * 1024)
 #define DP_EPSILON_M 20.0
 #define PARK_AFTER_MS (10 * 60 * 1000UL)  // no movement this long -> parked
-#define PEEK_EVERY_MS (15 * 60 * 1000UL)  // parked GPS peek cadence
-#define PEEK_TIMEOUT_MS (120 * 1000UL)    // give up waiting for a fix
-#define UNPARK_DIST_M 50.0                // moved this far from parking spot -> riding
+// Walk-detection tuning (2026-07-12): two field walks never unparked — the 15-min
+// peek + 120s fix window + 50m radius gauntlet loses to walking pace with the node
+// in a pocket. Denser peeks + longer fix window + tighter radius; parked cost is
+// ~3x peek current, affordable on a healthy cell. (Engine-sense divider on the
+// scooter remains the definitive fix per docs/tracker.md.)
+#define PEEK_EVERY_MS (5 * 60 * 1000UL)   // parked GPS peek cadence
+#define PEEK_TIMEOUT_MS (180 * 1000UL)    // give up waiting for a fix
+#define UNPARK_DIST_M 25.0                // moved this far from parking spot -> riding
 
 MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
