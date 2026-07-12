@@ -1540,7 +1540,15 @@ std::unique_ptr<GPS> GPS::createGps()
     // convention is active-HIGH (standard N-channel). GPS_EN_ACTIVE describes only the ONBOARD
     // enable circuit (e.g. Heltec V4's active-LOW P-channel MOSFET), so its polarity must NOT be
     // applied to a user-overridden pin, otherwise enabling the GPS cuts power. See issue #8310.
+    // "User circuit" only when the configured pin differs from the board's own PIN_GPS_EN:
+    // a config that names the onboard pin (common after --export/--configure round-trips)
+    // must keep the onboard polarity, else the onboard FET is driven backwards and the
+    // GPS never powers on (field regression 2026-07-12).
+#if defined(PIN_GPS_EN)
+    const bool _en_gpio_user = (_en_gpio != 0 && _en_gpio != PIN_GPS_EN);
+#else
     const bool _en_gpio_user = (_en_gpio != 0);
+#endif
 
 #if defined(GPS_RX_PIN)
     if (!_rx_gpio)
