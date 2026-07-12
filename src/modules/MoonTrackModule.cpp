@@ -18,7 +18,7 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define TRACK_STATE "/moontrack.st"
 #define REC_SZ ((uint32_t)sizeof(Rec))
 #define MIN_DIST_M 15.0
-#define MIN_INTERVAL_S 30
+#define MIN_INTERVAL_S 20 // 2026-07-13: denser raw recording for map resolution
 #define KEEPALIVE_S 600
 #define GATEWAY_NODE 0x62ec2a74 // WSMX — hearing home is what makes syncing possible
 #define PRESENCE_WINDOW_S 600
@@ -30,7 +30,7 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define ACK_TIMEOUT_MS 60000
 #define MAX_RETRIES 2
 #define LOG_COMPACT_BYTES (1024 * 1024)
-#define DP_EPSILON_M 20.0
+#define DP_EPSILON_M 8.0 // 2026-07-13: 20m shed too much curve detail on rides; ~2x points, still ~4 packets/hour-of-trip
 #define PARK_AFTER_MS (10 * 60 * 1000UL)  // no movement this long -> parked
 // Walk-detection tuning (2026-07-12): two field walks never unparked — the 15-min
 // peek + 120s fix window + 50m radius gauntlet loses to walking pace with the node
