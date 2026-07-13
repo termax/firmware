@@ -77,9 +77,6 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     void toRiding();
     void toParked();
     void sendHeartbeat();
-
-  public:
-    void forceRiding(); // PRG button: deterministic "recording now" (2026-07-13)
 };
 
 extern MoonTrackModule *moonTrackModule;

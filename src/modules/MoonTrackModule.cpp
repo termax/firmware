@@ -213,13 +213,6 @@ void MoonTrackModule::powerTick()
     }
 }
 
-void MoonTrackModule::forceRiding()
-{
-    // PRG button: rider says "recording now" — GPS on, riding rules, no guessing.
-    LOG_INFO("MoonTrack: force RIDING (button)");
-    toRiding();
-}
-
 // ---- presence ------------------------------------------------------------
 
 bool MoonTrackModule::gatewayHeard()

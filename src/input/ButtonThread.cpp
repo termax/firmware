@@ -1,7 +1,4 @@
 #include "ButtonThread.h"
-#ifdef MOONHUT_TRACKER
-#include "modules/MoonTrackModule.h"
-#endif
 #include "meshUtils.h"
 
 #include "configuration.h"
@@ -189,12 +186,6 @@ int32_t ButtonThread::runOnce()
         evt.touchY = 0;
         switch (btnEvent) {
         case BUTTON_EVENT_PRESSED: {
-#ifdef MOONHUT_TRACKER
-            // Tracker: PRG press = force RIDING (GPS on, recording) — the rider's
-            // deterministic "trip starts now" switch (2026-07-13).
-            if (moonTrackModule)
-                moonTrackModule->forceRiding();
-#endif
             // Forward single press to InputBroker (but NOT as DOWN/SELECT, just forward a "button press" event)
             evt.inputEvent = _singlePress;
             // evt.kbchar = _singlePress; // todo: fix this. Some events are kb characters rather than event types
