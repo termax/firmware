@@ -67,6 +67,7 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     // Light sleep comes from provisioning (is_power_saving=true, role CLIENT).
     enum PowerMode { RIDING, PARKED, PEEKING };
     PowerMode mode = RIDING;
+    bool hadFirstFix = false; // no parking before the GPS proves it can fix (2026-07-13)
     uint32_t lastMoveMs = 0;
     uint32_t parkedCycleMs = 0;
     uint32_t peekStartMs = 0;
@@ -75,6 +76,9 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     void toRiding();
     void toParked();
     void sendHeartbeat();
+
+  public:
+    void forceRiding(); // PRG button: deterministic "recording now" (2026-07-13)
 };
 
 extern MoonTrackModule *moonTrackModule;

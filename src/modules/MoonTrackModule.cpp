@@ -32,6 +32,7 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define LOG_COMPACT_BYTES (1024 * 1024)
 #define DP_EPSILON_M 8.0 // 2026-07-13: 20m shed too much curve detail on rides; ~2x points, still ~4 packets/hour-of-trip
 #define PARK_AFTER_MS (10 * 60 * 1000UL)  // no movement this long -> parked
+#define FIRSTFIX_HUNT_MS (30 * 60 * 1000UL) // keep GPS hunting after boot until FIRST fix (battery cap)
 // Walk-detection tuning (2026-07-12): two field walks never unparked — the 15-min
 // peek + 120s fix window + 50m radius gauntlet loses to walking pace with the node
 // in a pocket. Denser peeks + longer fix window + tighter radius; parked cost is
@@ -149,10 +150,19 @@ void MoonTrackModule::sendHeartbeat()
 
 void MoonTrackModule::powerTick()
 {
+    if (!hadFirstFix && gpsStatus && gpsStatus->getHasLock()) {
+        hadFirstFix = true;
+        LOG_INFO("MoonTrack: first GPS fix since boot");
+    }
     switch (mode) {
     case RIDING:
-        if (lastMoveMs && (millis() - lastMoveMs) > PARK_AFTER_MS)
-            toParked();
+        // 2026-07-13: an indoor boot burned the whole RIDING window fixless, then moving
+        // peeks (cold GPS + Doppler) failed all trip -> nothing recorded. Until the GPS
+        // proves it can fix, keep hunting instead of parking (capped for battery).
+        if (lastMoveMs && (millis() - lastMoveMs) > PARK_AFTER_MS) {
+            if (hadFirstFix || millis() > FIRSTFIX_HUNT_MS)
+                toParked();
+        }
         break;
     case PARKED:
         if ((millis() - parkedCycleMs) > PEEK_EVERY_MS) {
@@ -184,6 +194,13 @@ void MoonTrackModule::powerTick()
         break;
     }
     }
+}
+
+void MoonTrackModule::forceRiding()
+{
+    // PRG button: rider says "recording now" — GPS on, riding rules, no guessing.
+    LOG_INFO("MoonTrack: force RIDING (button)");
+    toRiding();
 }
 
 // ---- presence ------------------------------------------------------------
