@@ -41,6 +41,7 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define PEEK_EVERY_MS (5 * 60 * 1000UL)   // parked GPS peek cadence
 #define PEEK_TIMEOUT_MS (180 * 1000UL)    // give up waiting for a fix
 #define UNPARK_DIST_M 25.0                // moved this far from parking spot -> riding
+#define UNPARK_CONFIRM_MS (20 * 1000UL)   // second fix this much later must agree
 
 MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
@@ -178,13 +179,29 @@ void MoonTrackModule::powerTick()
             double dLat = (gpsStatus->getLatitude() - parkLat) * 1e-7 * 111320.0;
             double dLon = (gpsStatus->getLongitude() - parkLon) * 1e-7 * 111320.0 *
                           cos(parkLat * 1e-7 * M_PI / 180.0);
+            // 2026-07-13: single drifty fixes faked 25-110 m "moves" while parked
+            // (scatter bursts in Traccar). A real departure keeps the distance past
+            // the threshold; drift settles back. Demand a second agreeing fix
+            // UNPARK_CONFIRM_MS later before unparking.
             if (sqrt(dLat * dLat + dLon * dLon) > UNPARK_DIST_M) {
-                toRiding();
-                return;
+                if (!unparkFirstMs) {
+                    unparkFirstMs = millis();
+                } else if ((millis() - unparkFirstMs) >= UNPARK_CONFIRM_MS) {
+                    unparkFirstMs = 0;
+                    toRiding();
+                    return;
+                }
+            } else {
+                if (unparkFirstMs)
+                    LOG_INFO("MoonTrack: unpark canceled (GPS drift)");
+                unparkFirstMs = 0;
+                timeout = true; // solid fix, still parked — wrap up the peek
             }
-            timeout = true; // got a fix, still parked — wrap up the peek
         }
+        if (unparkFirstMs && (millis() - unparkFirstMs) < (UNPARK_CONFIRM_MS + 60000UL))
+            timeout = false; // hold the peek open until the confirm resolves
         if (timeout) {
+            unparkFirstMs = 0;
             sendHeartbeat();
             if (gps)
                 gps->disable();

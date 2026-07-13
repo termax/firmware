@@ -71,6 +71,7 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastMoveMs = 0;
     uint32_t parkedCycleMs = 0;
     uint32_t peekStartMs = 0;
+    uint32_t unparkFirstMs = 0; // first beyond-threshold peek fix; a 2nd must confirm
     int32_t parkLat = 0, parkLon = 0;
     void powerTick();
     void toRiding();
