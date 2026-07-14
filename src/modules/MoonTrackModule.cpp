@@ -20,7 +20,7 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define MIN_DIST_M 15.0
 #define MIN_INTERVAL_S 20 // 2026-07-13: denser raw recording for map resolution
 #define KEEPALIVE_S 600
-#define GATEWAY_NODE 0x62ec2a74 // WSMX — hearing home is what makes syncing possible
+#define GATEWAY_NODE 0x8fa66864 // gateway V4 (was WSMX 0x62ec2a74) — hearing home is what makes syncing possible
 #define PRESENCE_WINDOW_S 600
 #define PRESENCE_STABLE_MS 120000
 #define CHUTIL_MAX 40.0f // 25 proved too shy on a chatty day; 1pkt/30s is the real limiter
