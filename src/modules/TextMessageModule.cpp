@@ -33,10 +33,32 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
     enum MoonKind { MOON_NONE, MOON_PERSIST, MOON_FLASH_DM, MOON_FLASH_PUB };
     MoonKind moonKind = MOON_NONE;
 #ifdef MOONHUT_SIGN
+    size_t moonSkip = 0; // bytes of a leading "@target " to strip before display
     if (mp.from != 0) {
-        if (strcmp(channels.getByIndex(mp.channel).settings.name, "MoonPaper") == 0)
+        if (strcmp(channels.getByIndex(mp.channel).settings.name, "MoonPaper") == 0) {
             moonKind = MOON_PERSIST;
-        else if (!isBroadcast(mp.to) && isToUs(&mp))
+            // Multi-sign targeting (2026-07-16, fleet grew beyond one sign): "@SHORT msg"
+            // on the sign channel is for the sign whose owner short name matches (case-
+            // insensitive); "@all msg" or no prefix = every sign. Non-matching signs stay
+            // completely quiet (no flash, no wake, no qr-ack). Runtime owner.short_name =
+            // re-targeting a sign is a config change, not a reflash.
+            const char *t = reinterpret_cast<const char *>(mp.decoded.payload.bytes);
+            if (t[0] == '@') {
+                char tgt[17] = {0};
+                size_t n = 0;
+                while (n < sizeof(tgt) - 1 && t[1 + n] && t[1 + n] != ' ' && t[1 + n] != ':')
+                    tgt[n] = t[1 + n], n++;
+                const char *rest = t + 1 + n;
+                while (*rest == ' ' || *rest == ':')
+                    rest++;
+                if (n == 0 || !*rest)
+                    moonKind = MOON_NONE; // "@" alone / empty body — nothing to show
+                else if (strcasecmp(tgt, "all") == 0 || strcasecmp(tgt, owner.short_name) == 0)
+                    moonSkip = (size_t)(rest - t);
+                else
+                    moonKind = MOON_NONE; // addressed to another sign
+            }
+        } else if (!isBroadcast(mp.to) && isToUs(&mp))
             moonKind = MOON_FLASH_DM;
         else
             moonKind = MOON_FLASH_PUB;
@@ -78,7 +100,7 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
         } else {
             snprintf(attr, sizeof(attr), "%s%s", prefix, sname);
         }
-        const char *text = reinterpret_cast<const char *>(mp.decoded.payload.bytes);
+        const char *text = reinterpret_cast<const char *>(mp.decoded.payload.bytes) + moonSkip;
         if (moonKind == MOON_PERSIST)
             graphics::MessageRenderer::setMoonSignMessage(text, attr);
         else
