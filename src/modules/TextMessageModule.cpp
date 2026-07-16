@@ -59,7 +59,10 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
                     moonKind = MOON_NONE; // addressed to another sign
             }
         } else if (!isBroadcast(mp.to) && isToUs(&mp))
-            moonKind = MOON_FLASH_DM;
+            // DM = this sign's own content (2026-07-16): with the Paper's USB dead and
+            // unflashable, DMs are the per-device targeting path that needs no channel
+            // convention — a text DM to a sign IS its new sign text, not a 10s flash.
+            moonKind = MOON_PERSIST;
         else
             moonKind = MOON_FLASH_PUB;
     }
