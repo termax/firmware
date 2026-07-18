@@ -348,10 +348,13 @@ static void drawMessageScrollbar(OLEDDisplay *display, int visibleHeight, int to
 #define MOON_FONT_S ArialMT_Plain_10
 #endif
 static const uint8_t *MOON_FONTS[] = {Monospaced_plain_30, MOON_FONT_L, MOON_FONT_M, MOON_FONT_S};
-static char s_moonMsg[200] = "";
+// Boot content: until the first real message arrives, the sign shows a QR to the
+// fleet dashboard (38B payload = QR V3 sweet spot) — whoever holds a freshly
+// rebooted sign can scan straight into FleetView. LAN/tailnet-resolvable only.
+static char s_moonMsg[200] = "qr:http://fleet.internal.moonhutbeach.com|Fleet dashboard";
 static char s_moonAttr[64] = "";
-static bool s_moonHas = false;
-static bool s_moonDirty = false;
+static bool s_moonHas = true;
+static bool s_moonDirty = true;
 static bool s_moonNewPersistent = false; // fresh MoonPaper message → restart paging cycles
 static char s_moonFlashMsg[200] = "";    // transient overlay (DMs / other channels), never replaces s_moonMsg
 static char s_moonFlashAttr[64] = "";
