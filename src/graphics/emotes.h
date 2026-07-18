@@ -22,6 +22,17 @@ extern const int numEmotes;
 extern const unsigned char thumbup[] PROGMEM;
 extern const unsigned char thumbdown[] PROGMEM;
 
+// Sport glyphs (MoonHut sign build 2026-07-18: score lines & captions)
+#define sport_height 16
+#define sport_width 16
+extern const unsigned char rugby_ball[] PROGMEM;
+extern const unsigned char soccer_ball[] PROGMEM;
+extern const unsigned char basketball[] PROGMEM;
+extern const unsigned char tennis[] PROGMEM;
+extern const unsigned char volleyball[] PROGMEM;
+extern const unsigned char boxing_glove[] PROGMEM;
+extern const unsigned char golf_flag[] PROGMEM;
+
 #define smiling_eyes_height 16
 #define smiling_eyes_width 16
 extern const unsigned char smiling_eyes[] PROGMEM;
