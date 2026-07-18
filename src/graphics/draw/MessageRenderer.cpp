@@ -351,7 +351,7 @@ static const uint8_t *MOON_FONTS[] = {Monospaced_plain_30, MOON_FONT_L, MOON_FON
 // Boot content: until the first real message arrives, the sign shows a QR to the
 // fleet dashboard (38B payload = QR V3 sweet spot) — whoever holds a freshly
 // rebooted sign can scan straight into FleetView. LAN/tailnet-resolvable only.
-static char s_moonMsg[200] = "qr:http://fleet.internal.moonhutbeach.com|Fleet dashboard";
+static char s_moonMsg[200] = "qr:http://fleet.internal.moonhutbeach.com|MoonHut^Fleet dashboard";
 static char s_moonAttr[64] = "";
 static bool s_moonHas = true;
 static bool s_moonDirty = true;
@@ -899,18 +899,64 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
     display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]);
     display->setTextAlignment(TEXT_ALIGN_LEFT);
 
-    // Caption at the top of the column
+    // Caption at the top of the column. "<heading>^<body>" renders the heading in the
+    // largest font that fits (24 -> 16 -> 10) with a small crescent brand accent beside
+    // it; the body renders at 16pt, dropping to 10pt only when it truly doesn't fit.
+    // A plain caption (no '^') is treated as body-only. The QR zone is never touched.
     int colY = 2;
     if (caption[0] && colW > 20) {
-        std::vector<std::string> rows;
-        moonWrapLine(display, caption, colW, MOON_MIN_FONT_IDX, rows);
-        for (const auto &r : rows) {
-            if (colY + rowH > H - 2 * rowH) // leave room for the service rows
-                break;
-            // emote-aware so an emoji in the caption renders as a bitmap, not mojibake
-            EmoteRenderer::drawStringWithEmotes(display, colX, colY, r, rowH - 1, emotes, numEmotes);
-            colY += rowH;
+        char *body = strchr(caption, '^');
+        const char *heading = nullptr;
+        if (body) {
+            *body++ = '\0';
+            heading = caption;
+        } else {
+            body = caption;
         }
+        const int svcTop = H - 2 * rowH - 2; // service rows stay reserved
+        if (heading && heading[0]) {
+            uint8_t hf = 1; // 24pt, shrink until the heading block stays compact
+            std::vector<std::string> hrows;
+            while (true) {
+                hrows.clear();
+                moonWrapLine(display, heading, colW - 18, hf, hrows); // -18: crescent's spot
+                if ((int)hrows.size() * moonFontH(hf) <= moonFontH(1) * 2 || hf >= MOON_MIN_FONT_IDX)
+                    break;
+                hf++;
+            }
+            display->setFont(MOON_FONTS[hf]);
+            const int hH = moonFontH(hf);
+            for (const auto &r : hrows) {
+                if (colY + hH > svcTop)
+                    break;
+                EmoteRenderer::drawStringWithEmotes(display, colX, colY, r, hH - 1, emotes, numEmotes);
+                colY += hH;
+            }
+            drawMoonAccent(display, W - 12, 2 + hH / 2, 7); // brand accent beside the heading
+            display->setColor(WHITE);
+            colY += 2;
+        }
+        if (body[0]) {
+            uint8_t bf = 2; // 16pt body by default — the old 10pt was too small to read
+            std::vector<std::string> brows;
+            moonWrapLine(display, body, colW, bf, brows);
+            if (colY + (int)brows.size() * moonFontH(bf) > svcTop) {
+                bf = MOON_MIN_FONT_IDX;
+                brows.clear();
+                moonWrapLine(display, body, colW, bf, brows);
+            }
+            display->setFont(MOON_FONTS[bf]);
+            const int bH = moonFontH(bf);
+            for (const auto &r : brows) {
+                if (colY + bH > svcTop)
+                    break;
+                // emote-aware so an emoji in the caption renders as a bitmap, not mojibake
+                EmoteRenderer::drawStringWithEmotes(display, colX, colY, r, bH - 1, emotes, numEmotes);
+                colY += bH;
+            }
+        }
+        display->setFont(MOON_FONTS[MOON_MIN_FONT_IDX]); // service rows stay 10pt
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
     }
 
     // Service rows pinned to the column bottom: attribution, then battery + name
