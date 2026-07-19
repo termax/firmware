@@ -73,6 +73,9 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     uint32_t peekStartMs = 0;
     uint32_t unparkFirstMs = 0; // first beyond-threshold peek fix; a 2nd must confirm
     int32_t parkLat = 0, parkLon = 0;
+    float parkGwSnr = 0;        // gateway SNR snapshot at park time (RF-change unpark assist)
+    bool parkGwValid = false;   // snapshot taken (gateway was in NodeDB at park)
+    bool prevGwHeard = false;   // presence edge detection while parked
     void powerTick();
     void toRiding();
     void toParked();

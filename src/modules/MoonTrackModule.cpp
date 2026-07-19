@@ -103,7 +103,9 @@ void MoonTrackModule::maybeRecord()
     if (!moved && !keepalive)
         return;
 
-    Rec r = {now, lat, lon, (int16_t)(gpsStatus->getAltitude()), 0, 0};
+    // flags bit0 = keepalive (stationary repeat) — lets the hub feed Traccar only
+    // real movement instead of inferring it from exact coordinate repeats
+    Rec r = {now, lat, lon, (int16_t)(gpsStatus->getAltitude()), 0, (uint8_t)(moved ? 0 : 1)};
     auto f = FSCom.open(TRACK_LOG, "a");
     if (f) {
         f.write((uint8_t *)&r, REC_SZ);
@@ -131,11 +133,22 @@ void MoonTrackModule::toParked()
 {
     parkLat = lastLat;
     parkLon = lastLon;
-    if (gps)
-        gps->disable(); // biggest single parked saving (~30-40mA); radio keeps listening
+    if (gps) {
+        gps->disable(); // stop GPS thread scheduling; radio keeps listening
+        // ...but keep the module in SOFTSLEEP (powered, standby pin asleep) instead of
+        // full OFF: ephemeris/RTC retained -> peeks warm-start in seconds instead of
+        // failing 3-min cold starts under marginal sky (the 16h-frozen-fix incident,
+        // 2026-07-19). Costs ~1 mA standby; the healthy cell doesn't notice.
+        gps->setPowerState(GPS_SOFTSLEEP);
+    }
     mode = PARKED;
     parkedCycleMs = millis();
-    LOG_INFO("MoonTrack: PARKED");
+    // RF snapshot for the peek-on-change assist
+    const meshtastic_NodeInfoLite *gw = nodeDB ? nodeDB->getMeshNode(GATEWAY_NODE) : nullptr;
+    parkGwValid = (gw != nullptr);
+    parkGwSnr = gw ? gw->snr : 0;
+    prevGwHeard = gatewayHeard();
+    LOG_INFO("MoonTrack: PARKED (gwSnr %.1f)", parkGwSnr);
 }
 
 void MoonTrackModule::sendHeartbeat()
@@ -165,14 +178,31 @@ void MoonTrackModule::powerTick()
                 toParked();
         }
         break;
-    case PARKED:
-        if ((millis() - parkedCycleMs) > PEEK_EVERY_MS) {
+    case PARKED: {
+        // Peek-on-RF-change: a parked node whose radio world shifts hard has almost
+        // certainly been moved (carried home in a bag, 2026-07-19) — peek NOW instead
+        // of waiting for the drumbeat. Triggers: gateway SNR far from the park
+        // snapshot, or the gateway reappearing after being lost.
+        bool rfShift = false;
+        const meshtastic_NodeInfoLite *gw = nodeDB ? nodeDB->getMeshNode(GATEWAY_NODE) : nullptr;
+        if (parkGwValid && gw && fabsf(gw->snr - parkGwSnr) >= 8.0f)
+            rfShift = true;
+        bool gwNow = gatewayHeard();
+        if (gwNow && !prevGwHeard)
+            rfShift = true; // home reappeared — world changed
+        prevGwHeard = gwNow;
+        if (rfShift)
+            LOG_INFO("MoonTrack: RF shift while parked -> early peek");
+        if (rfShift || (millis() - parkedCycleMs) > PEEK_EVERY_MS) {
+            if (rfShift && gw)
+                parkGwSnr = gw->snr; // rebase so one shift = one extra peek, not a storm
             if (gps)
                 gps->enable();
             mode = PEEKING;
             peekStartMs = millis();
         }
         break;
+    }
     case PEEKING: {
         bool timeout = (millis() - peekStartMs) > PEEK_TIMEOUT_MS;
         if (gpsStatus && gpsStatus->getHasLock()) {
@@ -203,8 +233,10 @@ void MoonTrackModule::powerTick()
         if (timeout) {
             unparkFirstMs = 0;
             sendHeartbeat();
-            if (gps)
+            if (gps) {
                 gps->disable();
+                gps->setPowerState(GPS_SOFTSLEEP); // warm-sleep between peeks (see toParked)
+            }
             mode = PARKED;
             parkedCycleMs = millis();
         }
@@ -388,6 +420,13 @@ ProcessMessage MoonTrackModule::handleReceived(const meshtastic_MeshPacket &mp)
     if (mp.from == GATEWAY_NODE)
         gwSeenMs = millis(); // presence proof: home spoke to us on our port
     auto &d = mp.decoded;
+    // Remote wake ("TW" from home): one deliberate riding stint — GPS on until a real
+    // fix, records + syncs, then re-parks. The couch-side unstick (PRG is wake-only).
+    if (d.payload.size >= 2 && d.payload.bytes[0] == 'T' && d.payload.bytes[1] == 'W' && mp.from == GATEWAY_NODE) {
+        LOG_INFO("MoonTrack: remote wake from home -> RIDING");
+        toRiding();
+        return ProcessMessage::STOP;
+    }
     if (d.payload.size >= 3 && d.payload.bytes[0] == 'T' && d.payload.bytes[1] == 'A' &&
         d.payload.bytes[2] == seqInFlight && awaitingAck) {
         awaitingAck = false;
