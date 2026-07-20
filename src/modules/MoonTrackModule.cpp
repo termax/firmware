@@ -94,6 +94,27 @@ void MoonTrackModule::maybeRecord()
     if (now == 0)
         return; // no usable clock yet
 
+    // First-fix quarantine: a cold GPS's first fix can land km off (phantom points
+    // that Traccar draws straight lines through). Hold the first fix after boot;
+    // record only once a second, independent fix agrees within 300 m. A stale
+    // quarantine (>5 min old) restarts — the rogue never escapes.
+    if (!firstFixVetted) {
+        double pdLat = (lat - pendLat) * 1e-7 * 111320.0;
+        double pdLon = (lon - pendLon) * 1e-7 * 111320.0 * cos(lat * 1e-7 * M_PI / 180.0);
+        if (!pendMs || (millis() - pendMs) > 5 * 60 * 1000UL) {
+            pendLat = lat; pendLon = lon; pendMs = millis();
+            return;
+        }
+        if ((millis() - pendMs) < 10 * 1000UL)
+            return; // same fix burst — wait for an independent sample
+        if (sqrt(pdLat * pdLat + pdLon * pdLon) > 300.0) {
+            LOG_INFO("MoonTrack: first-fix disagreement — discarding as rogue");
+            pendLat = lat; pendLon = lon; pendMs = millis();
+            return;
+        }
+        firstFixVetted = true; // two fixes agree — trust GPS from here on
+    }
+
     // Equirectangular distance from the last recorded point
     double dLat = (lat - lastLat) * 1e-7 * 111320.0;
     double dLon = (lon - lastLon) * 1e-7 * 111320.0 * cos(lat * 1e-7 * M_PI / 180.0);

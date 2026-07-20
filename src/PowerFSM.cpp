@@ -131,6 +131,15 @@ static void lsIdle()
 
 #ifdef BUTTON_PIN
                 bool pressed = !digitalRead(config.device.button_gpio ? config.device.button_gpio : BUTTON_PIN);
+#ifdef MOONHUT_TRACKER
+                // A short tap is often released before this digitalRead runs, so the
+                // wake silently produced no press and the screen stayed dark ("PRG
+                // does nothing on battery", 2026-07-20). On this board a plain GPIO
+                // wake can only be the user button (LoRa DIO1 wakes via ext0), so
+                // the wake cause itself is proof of a press.
+                if (wakeCause2 == ESP_SLEEP_WAKEUP_GPIO)
+                    pressed = true;
+#endif
 #else
                 bool pressed = false;
 #endif
