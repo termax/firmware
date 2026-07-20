@@ -190,6 +190,18 @@ void MoonTrackModule::powerTick()
         bool gwNow = gatewayHeard();
         if (gwNow && !prevGwHeard)
             rfShift = true; // home reappeared — world changed
+        if (!gwNow && prevGwHeard) {
+            // Departure hunt (2026-07-20, lost outbound legs to Nathon/Chaweng):
+            // home's radio just went quiet while we're parked — almost certainly
+            // driving away. Peeks can't fix from inside a moving car; go RIDING
+            // so GPS hunts continuously and the outbound leg records from
+            // mid-route instead of starting at the destination. Self-bounding:
+            // fixless/stationary riding re-parks after PARK_AFTER_MS.
+            prevGwHeard = gwNow;
+            LOG_INFO("MoonTrack: home lost while parked -> departure hunt");
+            toRiding();
+            return;
+        }
         prevGwHeard = gwNow;
         if (rfShift)
             LOG_INFO("MoonTrack: RF shift while parked -> early peek");
