@@ -155,14 +155,11 @@ void MoonTrackModule::toParked()
 {
     parkLat = lastLat;
     parkLon = lastLon;
-    if (gps) {
-        gps->disable(); // stop GPS thread scheduling; radio keeps listening
-        // ...but keep the module in SOFTSLEEP (powered, standby pin asleep) instead of
-        // full OFF: ephemeris/RTC retained -> peeks warm-start in seconds instead of
-        // failing 3-min cold starts under marginal sky (the 16h-frozen-fix incident,
-        // 2026-07-19). Costs ~1 mA standby; the healthy cell doesn't notice.
-        gps->setPowerState(GPS_SOFTSLEEP);
-    }
+    if (gps)
+        gps->disable(); // FULL off. Softsleep reverted 2026-07-23: the module's STANDBY
+                        // line is (evidently) unwired, so GPS_SOFTSLEEP held the module
+                        // at acquisition power all night — measured 4.4%/h parked drain.
+                        // Peek backoff + RF departure detection make cold peeks affordable.
     mode = PARKED;
     parkedCycleMs = millis();
     // RF snapshot for the peek-on-change assist
@@ -249,10 +246,7 @@ void MoonTrackModule::powerTick()
         break;
     }
     case PEEKING: {
-        // Warm-peek cap: with softsleep retention a fix arrives in seconds or not at
-        // all — don't burn the full 3-min window when the last lock was recent.
-        uint32_t window = (lastLockMs && (millis() - lastLockMs) < 2 * 3600 * 1000UL) ? 45 * 1000UL : PEEK_TIMEOUT_MS;
-        bool timeout = (millis() - peekStartMs) > window;
+        bool timeout = (millis() - peekStartMs) > PEEK_TIMEOUT_MS; // full window: cold starts need it (softsleep reverted)
         if (gpsStatus && gpsStatus->getHasLock()) {
             lastLockMs = millis();
             fixlessPeeks = 0;
@@ -285,10 +279,8 @@ void MoonTrackModule::powerTick()
                 fixlessPeeks++; // lockless peek — climb the backoff ladder
             unparkFirstMs = 0;
             sendHeartbeat();
-            if (gps) {
-                gps->disable();
-                gps->setPowerState(GPS_SOFTSLEEP); // warm-sleep between peeks (see toParked)
-            }
+            if (gps)
+                gps->disable(); // full off between peeks (softsleep reverted, see toParked)
             mode = PARKED;
             parkedCycleMs = millis();
         }
