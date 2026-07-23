@@ -32,6 +32,9 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define LOG_COMPACT_BYTES (1024 * 1024)
 #define DP_EPSILON_M 8.0 // 2026-07-13: 20m shed too much curve detail on rides; ~2x points, still ~4 packets/hour-of-trip
 #define PARK_AFTER_MS (10 * 60 * 1000UL)  // no movement this long -> parked
+#define PARK_JITTER_M 60.0                // stationary open-sky GPS scatter radius (2026-07-23: 30-75m
+                                          // orbit outside beat MIN_DIST_M all night -> rode at 4.3%/h)
+#define MOVING_WINDOW_MS (2 * 60 * 1000UL) // full 15m-resolution recording while the anchor moved this recently
 #define FIRSTFIX_HUNT_MS (30 * 60 * 1000UL) // keep GPS hunting after boot until FIRST fix (battery cap)
 // Walk-detection tuning (2026-07-12): two field walks never unparked — the 15-min
 // peek + 120s fix window + 50m radius gauntlet loses to walking pace with the node
@@ -119,7 +122,23 @@ void MoonTrackModule::maybeRecord()
     double dLat = (lat - lastLat) * 1e-7 * 111320.0;
     double dLon = (lon - lastLon) * 1e-7 * 111320.0 * cos(lat * 1e-7 * M_PI / 180.0);
     double dist = sqrt(dLat * dLat + dLon * dLon);
-    bool moved = dist >= MIN_DIST_M && (now - lastRecTime) >= MIN_INTERVAL_S;
+
+    // Park-anchor jitter gate: real movement = escaping a PARK_JITTER_M circle
+    // around a slow anchor; only that arms the park timer. Raw 15m record jumps
+    // must NOT — a stationary receiver's scatter resets the timer forever and the
+    // node never parks (first outdoor-parked night, 2026-07-23). Recording keeps
+    // its full resolution while the anchor is in motion (MOVING_WINDOW_MS), so
+    // ride detail is untouched; a stationary orbit degrades to keepalives only.
+    double aLat = (lat - anchorLat) * 1e-7 * 111320.0;
+    double aLon = (lon - anchorLon) * 1e-7 * 111320.0 * cos(lat * 1e-7 * M_PI / 180.0);
+    bool realMove = sqrt(aLat * aLat + aLon * aLon) >= PARK_JITTER_M;
+    if (realMove) {
+        anchorLat = lat;
+        anchorLon = lon;
+        lastMoveMs = millis();
+    }
+    bool moving = realMove || (millis() - lastMoveMs) < MOVING_WINDOW_MS;
+    bool moved = moving && dist >= MIN_DIST_M && (now - lastRecTime) >= MIN_INTERVAL_S;
     bool keepalive = (now - lastRecTime) >= KEEPALIVE_S;
     if (!moved && !keepalive)
         return;
@@ -134,8 +153,7 @@ void MoonTrackModule::maybeRecord()
         lastLat = lat;
         lastLon = lon;
         lastRecTime = now;
-        if (moved)
-            lastMoveMs = millis();
+        // lastMoveMs is armed only by the anchor gate above — never by raw records
     }
 }
 
@@ -147,6 +165,8 @@ void MoonTrackModule::toRiding()
         gps->enable();
     mode = RIDING;
     lastMoveMs = millis();
+    anchorLat = lastLat; // measure real movement from where we unparked; a false
+    anchorLon = lastLon; // alarm stays inside the jitter circle and re-parks
     fixlessPeeks = 0; // fresh situation — reset the peek backoff ladder
     LOG_INFO("MoonTrack: RIDING");
 }

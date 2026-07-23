@@ -48,6 +48,7 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
 
     uint32_t synced = 0;      // byte offset of first unsynced record in the log
     int32_t lastLat = 0, lastLon = 0;
+    int32_t anchorLat = 0, anchorLon = 0; // park-jitter anchor (real-movement gate)
     uint32_t lastRecTime = 0;
 
     // In-flight sync batch (decimated points covering log bytes synced..batchEnd)
