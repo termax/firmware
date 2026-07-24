@@ -1982,6 +1982,17 @@ int Screen::handleInputEvent(const InputEvent *event)
                        this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                 cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
             } else if (event->inputEvent == INPUT_BROKER_SELECT) {
+#ifdef MOONHUT_SIGN
+                // On a sign, a PRG HOLD (long-press = SELECT) on the message frame sends a
+                // read-receipt for the current message, not a menu (signs are keyboard-less).
+                // Short-press page-flipping (USER_PRESS) is handled separately and untouched.
+                if (this->ui->getUiState()->currentFrame == framesetInfo.positions.textMessage) {
+                    if (textMessageModule)
+                        textMessageModule->moonSignAck(); // no-op if no receipt is armed
+                    setFastFramerate();
+                    return 0;
+                }
+#endif
                 if (this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                     menuHandler::homeBaseMenu();
                 } else if (this->ui->getUiState()->currentFrame == framesetInfo.positions.system) {

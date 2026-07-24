@@ -33,7 +33,8 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
     enum MoonKind { MOON_NONE, MOON_PERSIST, MOON_FLASH_DM, MOON_FLASH_PUB };
     MoonKind moonKind = MOON_NONE;
 #ifdef MOONHUT_SIGN
-    size_t moonSkip = 0; // bytes of a leading "@target " to strip before display
+    size_t moonSkip = 0;         // bytes of a leading "@target#ackid " to strip before display
+    char moonAckPending[24] = ""; // receipt id parsed from the prefix ("" = no receipt)
     if (mp.from != 0) {
         if (strcmp(channels.getByIndex(mp.channel).settings.name, "MoonPaper") == 0) {
             moonKind = MOON_PERSIST;
@@ -46,16 +47,33 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             if (t[0] == '@') {
                 char tgt[17] = {0};
                 size_t n = 0;
-                while (n < sizeof(tgt) - 1 && t[1 + n] && t[1 + n] != ' ' && t[1 + n] != ':')
+                while (n < sizeof(tgt) - 1 && t[1 + n] && t[1 + n] != ' ' && t[1 + n] != ':' && t[1 + n] != '#')
                     tgt[n] = t[1 + n], n++;
                 const char *rest = t + 1 + n;
+                // Optional receipt id "#<ackid>" right after the target (2026-07-24):
+                // gateway mints it when a send requests a read-receipt. Parsed here,
+                // stripped with the rest of the prefix so it never reaches the screen.
+                char ackid[24] = {0};
+                if (*rest == '#') {
+                    rest++;
+                    size_t a = 0;
+                    while (a < sizeof(ackid) - 1 && *rest && *rest != ' ' && *rest != ':') {
+                        char c = *rest;
+                        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+                            ackid[a++] = c;
+                        rest++;
+                    }
+                    ackid[a] = 0;
+                }
                 while (*rest == ' ' || *rest == ':')
                     rest++;
                 if (n == 0 || !*rest)
                     moonKind = MOON_NONE; // "@" alone / empty body — nothing to show
-                else if (strcasecmp(tgt, "all") == 0 || strcasecmp(tgt, owner.short_name) == 0)
+                else if (strcasecmp(tgt, "all") == 0 || strcasecmp(tgt, owner.short_name) == 0) {
                     moonSkip = (size_t)(rest - t);
-                else
+                    if (ackid[0])
+                        strcpy(moonAckPending, ackid); // armed after render (see below)
+                } else
                     moonKind = MOON_NONE; // addressed to another sign
             }
         } else if (!isBroadcast(mp.to) && isToUs(&mp))
@@ -108,6 +126,21 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             graphics::MessageRenderer::setMoonSignMessage(text, attr);
         else
             graphics::MessageRenderer::setMoonFlashMessage(text, attr, moonKind == MOON_FLASH_DM ? 10000 : 3000);
+
+        // Read-receipt (2026-07-24): a persistent sign message carrying "@target#ackid"
+        // arms the PRG-hold ack and auto-DMs "rcv:<ackid>" now as delivery confirmation.
+        // A persistent message with no ackid disarms any stale pending id. Flashes and the
+        // DM/QR paths never arm a receipt.
+        if (moonKind == MOON_PERSIST) {
+            moonSetAckContext(moonAckPending, mp.from);
+            if (moonAckPending[0]) {
+                meshtastic_MeshPacket *rcv = allocDataPacket();
+                rcv->to = mp.from;
+                rcv->decoded.payload.size = snprintf((char *)rcv->decoded.payload.bytes,
+                                                     sizeof(rcv->decoded.payload.bytes), "rcv:%s", moonAckPending);
+                service->sendToMesh(rcv, RX_SRC_LOCAL, false);
+            }
+        }
 
         screen->setOn(true); // the sign must show incoming messages even from the screensaver
         UIFrameEvent e;
@@ -171,3 +204,26 @@ bool TextMessageModule::recentlySeen(uint32_t id)
     }
     return false;
 }
+
+#ifdef MOONHUT_SIGN
+void TextMessageModule::moonSetAckContext(const char *ackid, NodeNum from)
+{
+    strncpy(moonAckId, ackid ? ackid : "", sizeof(moonAckId) - 1);
+    moonAckId[sizeof(moonAckId) - 1] = 0;
+    moonAckFrom = from;
+}
+
+bool TextMessageModule::moonSignAck()
+{
+    if (!moonAckId[0])
+        return false; // nothing armed — let the caller fall through (e.g. no-op on a plain message)
+    meshtastic_MeshPacket *reply = allocDataPacket();
+    reply->to = moonAckFrom ? moonAckFrom : 0x8fa66864; // originator, else the gateway
+    reply->decoded.payload.size =
+        snprintf((char *)reply->decoded.payload.bytes, sizeof(reply->decoded.payload.bytes), "ack:%s", moonAckId);
+    service->sendToMesh(reply, RX_SRC_LOCAL, false);
+    graphics::MessageRenderer::setMoonFlashMessage("ACKNOWLEDGED", "", 3000); // plain ASCII: font has no U+2713
+    moonAckId[0] = '\0'; // one-shot: repeated holds on the same message don't re-ack
+    return true;
+}
+#endif

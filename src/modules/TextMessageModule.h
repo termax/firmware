@@ -22,6 +22,14 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
 
     bool recentlySeen(uint32_t id);
 
+#ifdef MOONHUT_SIGN
+    // Sign read-receipt: an incoming "@target#ackid msg" arms a pending ack. The sign
+    // auto-DMs "rcv:<ackid>" on display (delivery) and, when a human HOLDS the PRG
+    // button, "ack:<ackid>" (read). See TextMessageModule.cpp and Screen.cpp SELECT.
+    void moonSetAckContext(const char *ackid, NodeNum from); // arm (non-empty) / disarm ("")
+    bool moonSignAck(); // fire ack:<id> from a PRG hold; false if nothing armed
+#endif
+
   protected:
     /** Called to handle a particular incoming message
      *
@@ -34,6 +42,10 @@ class TextMessageModule : public SinglePortModule, public Observable<const mesht
   private:
     uint32_t textPacketList[TEXT_PACKET_LIST_SIZE] = {0};
     size_t textPacketListIndex = 0;
+#ifdef MOONHUT_SIGN
+    char moonAckId[24] = ""; // pending receipt id for the current sign message ("" = none)
+    NodeNum moonAckFrom = 0; // originator to DM the receipt back to
+#endif
 };
 
 extern TextMessageModule *textMessageModule;
