@@ -74,7 +74,8 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     uint32_t peekStartMs = 0;
     uint32_t unparkFirstMs = 0; // first beyond-threshold peek fix; a 2nd must confirm
     int32_t parkLat = 0, parkLon = 0;
-    uint8_t fixlessPeeks = 0;   // consecutive parked peeks without a lock -> backoff
+    uint8_t uneventfulPeeks = 0;   // consecutive parked peeks that ended still-parked (no lock,
+                                   // or lock at the park spot) -> cadence backoff (2026-07-24)
     uint32_t lastLockMs = 0;    // last GPS lock (warm-peek window sizing)
     int32_t pendLat = 0, pendLon = 0; // first-fix quarantine (rogue cold-fix guard)
     uint32_t pendMs = 0;

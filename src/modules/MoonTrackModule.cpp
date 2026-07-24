@@ -167,7 +167,7 @@ void MoonTrackModule::toRiding()
     lastMoveMs = millis();
     anchorLat = lastLat; // measure real movement from where we unparked; a false
     anchorLon = lastLon; // alarm stays inside the jitter circle and re-parks
-    fixlessPeeks = 0; // fresh situation — reset the peek backoff ladder
+    uneventfulPeeks = 0; // fresh situation — reset the peek backoff ladder
     LOG_INFO("MoonTrack: RIDING");
 }
 
@@ -249,14 +249,14 @@ void MoonTrackModule::powerTick()
         // consecutive lockless peeks, stretch the cadence — RF-based departure
         // detection now covers "we left", so blind peeking is redundant.
         uint32_t cadence = PEEK_EVERY_MS;                 // 5 min
-        if (fixlessPeeks >= 7) cadence = 60 * 60 * 1000UL;
-        else if (fixlessPeeks >= 5) cadence = 30 * 60 * 1000UL;
-        else if (fixlessPeeks >= 3) cadence = 15 * 60 * 1000UL;
+        if (uneventfulPeeks >= 7) cadence = 60 * 60 * 1000UL;
+        else if (uneventfulPeeks >= 5) cadence = 30 * 60 * 1000UL;
+        else if (uneventfulPeeks >= 3) cadence = 15 * 60 * 1000UL;
         if (rfShift || (millis() - parkedCycleMs) > cadence) {
             if (rfShift) {
                 if (gw)
                     parkGwSnr = gw->snr; // rebase so one shift = one extra peek, not a storm
-                fixlessPeeks = 0;        // world changed — earn the full retry ladder again
+                uneventfulPeeks = 0;        // world changed — earn the full retry ladder again
             }
             if (gps)
                 gps->enable();
@@ -269,7 +269,6 @@ void MoonTrackModule::powerTick()
         bool timeout = (millis() - peekStartMs) > PEEK_TIMEOUT_MS; // full window: cold starts need it (softsleep reverted)
         if (gpsStatus && gpsStatus->getHasLock()) {
             lastLockMs = millis();
-            fixlessPeeks = 0;
             double dLat = (gpsStatus->getLatitude() - parkLat) * 1e-7 * 111320.0;
             double dLon = (gpsStatus->getLongitude() - parkLon) * 1e-7 * 111320.0 *
                           cos(parkLat * 1e-7 * M_PI / 180.0);
@@ -295,8 +294,15 @@ void MoonTrackModule::powerTick()
         if (unparkFirstMs && (millis() - unparkFirstMs) < (UNPARK_CONFIRM_MS + 60000UL))
             timeout = false; // hold the peek open until the confirm resolves
         if (timeout) {
-            if (!(gpsStatus && gpsStatus->getHasLock()) && fixlessPeeks < 250)
-                fixlessPeeks++; // lockless peek — climb the backoff ladder
+            // Verification night 2 (2026-07-24): ONLY fixless peeks climbed the
+            // ladder, so an outdoor park (every peek locks, every lock is a cold
+            // start at full acquisition power) peeked at 5 min forever = 5.6%/h,
+            // worse than not parking. Any peek that ends still-parked is
+            // uneventful — no lock and lock-at-park-spot climb the same ladder.
+            // Departure coverage: RF hunt near home; away-parked accepts the
+            // late-start tradeoff (same call as the 2026-07-22 backoff).
+            if (uneventfulPeeks < 250)
+                uneventfulPeeks++; // uneventful peek — climb the backoff ladder
             unparkFirstMs = 0;
             sendHeartbeat();
             if (gps)
