@@ -134,11 +134,20 @@ static void lsIdle()
 #ifdef MOONHUT_TRACKER
                 // A short tap is often released before this digitalRead runs, so the
                 // wake silently produced no press and the screen stayed dark ("PRG
-                // does nothing on battery", 2026-07-20). On this board a plain GPIO
-                // wake can only be the user button (LoRa DIO1 wakes via ext0), so
-                // the wake cause itself is proof of a press.
+                // does nothing on battery", 2026-07-20). But the wake CAUSE alone is
+                // not proof of a press: LoRa DIO1 wakes via plain GPIO on this build
+                // too (not ext0 as an upstream comment claims), so every mesh packet
+                // read as a button and lit the screen all night (2026-07-24). The S3
+                // has no per-pin light-sleep wake status; discriminate by the radio
+                // IRQ line instead — DIO1 holds HIGH until its interrupt is serviced,
+                // so a GPIO wake with DIO1 quiet can only be the button.
+#if defined(LORA_DIO1) && (LORA_DIO1 != RADIOLIB_NC)
+                if (wakeCause2 == ESP_SLEEP_WAKEUP_GPIO && digitalRead(LORA_DIO1) == LOW)
+                    pressed = true;
+#else
                 if (wakeCause2 == ESP_SLEEP_WAKEUP_GPIO)
                     pressed = true;
+#endif
 #endif
 #else
                 bool pressed = false;
