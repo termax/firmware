@@ -46,6 +46,8 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
 void setMoonSignMessage(const char *msg, const char *attribution);
 /// MoonHut: show a transient message (DM or other-channel) for durationMs, then return to the sign message
 void setMoonFlashMessage(const char *msg, const char *attribution, uint32_t durationMs);
+/// MoonHut: persist the sign's home/boot screen (e.g. the per-paper login QR) and show it now
+void setMoonHome(const char *content);
 /// MoonHut: true when the sign is currently displaying a QR code (overlays must keep off the code)
 bool moonSignShowingQr();
 /// MoonHut: PRG press on the sign frame flips to the next page of a paged message (or dismisses a flash).

@@ -122,9 +122,14 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             snprintf(attr, sizeof(attr), "%s%s", prefix, sname);
         }
         const char *text = reinterpret_cast<const char *>(mp.decoded.payload.bytes) + moonSkip;
-        if (moonKind == MOON_PERSIST)
-            graphics::MessageRenderer::setMoonSignMessage(text, attr);
-        else
+        if (moonKind == MOON_PERSIST) {
+            // "sethome:<content>" persists the boot/home screen (per-paper login QR) to
+            // littlefs and shows it; a reboot restores it. Otherwise a normal sign message.
+            if (strncmp(text, "sethome:", 8) == 0)
+                graphics::MessageRenderer::setMoonHome(text + 8);
+            else
+                graphics::MessageRenderer::setMoonSignMessage(text, attr);
+        } else
             graphics::MessageRenderer::setMoonFlashMessage(text, attr, moonKind == MOON_FLASH_DM ? 10000 : 3000);
 
         // Read-receipt (2026-07-24): a persistent sign message carrying "@target#ackid"

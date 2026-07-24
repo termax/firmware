@@ -3,6 +3,7 @@
 #include "MessageRenderer.h"
 
 // Core includes
+#include "FSCommon.h" // littlefs: persist the sign's boot/home screen (per-paper login QR)
 #include "MessageStore.h"
 #include "NodeDB.h"
 #include "UIRenderer.h"
@@ -367,6 +368,11 @@ static std::vector<int> s_moonPageFirstRow;      // first row index of each page
 static uint32_t s_moonPagingStart = 0;
 static int s_moonLastPage = -1;
 static int s_moonManualPage = -1; // >=0: user flips pages with the PRG button; auto-cycling stops
+// Boot/home screen (2026-07-24): a "sethome:" message persists content to littlefs;
+// on boot the sign shows it instead of the compiled default (the per-paper login QR).
+// A normal message overrides it in RAM only, so a reboot restores the QR.
+static bool s_homeChecked = false;    // attempted to load /moonhome this boot
+static bool s_gotRealMessage = false; // a live message arrived -> don't clobber it with home
 
 static inline bool moonFlashActive()
 {
@@ -410,7 +416,44 @@ void setMoonSignMessage(const char *msg, const char *attribution)
     s_moonHas = true;
     s_moonDirty = true; // layout is recomputed on next render (needs the display for text metrics)
     s_moonNewPersistent = true;
-    s_moonFlashUntil = 0; // a new sign message outranks any flash in progress
+    s_moonFlashUntil = 0;      // a new sign message outranks any flash in progress
+    s_gotRealMessage = true;   // a live message is showing -> the boot loader won't overwrite it
+}
+
+// Persist the sign's home screen and show it now. The content (e.g. "qr:<url>|caption")
+// survives reboot and is what the sign displays until a live message arrives; a reboot
+// restores it. Called from a "sethome:" message.
+void setMoonHome(const char *content)
+{
+    if (!content || !content[0])
+        return;
+    auto f = FSCom.open("/moonhome", FILE_O_WRITE);
+    if (f) {
+        f.write((const uint8_t *)content, strlen(content));
+        f.close();
+    }
+    s_homeChecked = true; // it's current now; the boot loader is satisfied
+    setMoonSignMessage(content, "");
+}
+
+// On the first render after boot, replace the compiled default with the persisted
+// home screen (if any) — unless a live message already arrived. Runs once per boot.
+static void moonEnsureHomeLoaded()
+{
+    if (s_homeChecked || s_gotRealMessage)
+        return;
+    s_homeChecked = true;
+    auto f = FSCom.open("/moonhome", FILE_O_READ);
+    if (!f)
+        return;
+    size_t n = f.read((uint8_t *)s_moonMsg, sizeof(s_moonMsg) - 1);
+    f.close();
+    if (n > 0 && n < sizeof(s_moonMsg)) {
+        s_moonMsg[n] = '\0';
+        s_moonAttr[0] = '\0';
+        s_moonHas = true;
+        s_moonDirty = true;
+    }
 }
 
 void setMoonFlashMessage(const char *msg, const char *attribution, uint32_t durationMs)
@@ -977,6 +1020,7 @@ static void drawMoonQrContent(OLEDDisplay *display, const char *payload, int W, 
 
 static void drawMoonSignFrame(OLEDDisplay *display, int16_t x, int16_t y)
 {
+    moonEnsureHomeLoaded(); // first render after boot: swap in the persisted home screen (login QR)
     hasUnreadMessage = false;
     const int W = SCREEN_WIDTH;
     const int H = SCREEN_HEIGHT;
