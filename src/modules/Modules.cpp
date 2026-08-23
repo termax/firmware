@@ -89,6 +89,9 @@
 
 #if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
 #include "modules/ExternalNotificationModule.h"
+#ifdef MOONHUT_FRIDGE
+#include "modules/MoonFridgeModule.h"
+#endif
 #endif
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
 #include "modules/RangeTestModule.h"
@@ -247,6 +250,13 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
     externalNotificationModule = new ExternalNotificationModule();
+#endif
+#ifdef MOONHUT_FRIDGE
+    // MoonHut: DS18B20 probes + local over-temperature alarm. Constructed after
+    // ExternalNotificationModule so both share config.device.buzzer_gpio (PIN_BUZZER):
+    // this module handles the node-local threshold alarm, that one handles the
+    // bell-character alerts meshhub sends when it escalates.
+    moonFridgeModule = new MoonFridgeModule();
 #endif
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
     if (moduleConfig.has_range_test && moduleConfig.range_test.enabled)

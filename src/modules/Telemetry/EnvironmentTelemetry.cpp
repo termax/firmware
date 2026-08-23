@@ -17,6 +17,9 @@
 #include "graphics/images.h"
 #include "main.h"
 #include "modules/ExternalNotificationModule.h"
+#ifdef MOONHUT_FRIDGE
+#include "modules/MoonFridgeModule.h"
+#endif
 #include "power.h"
 #include "sleep.h"
 #include "target_specific.h"
@@ -577,6 +580,30 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
     if (rak9154Sensor.hasSensor()) {
         get_metrics = rak9154Sensor.getMetrics(m);
         valid = valid || get_metrics;
+        hasSensor = true;
+    }
+#endif
+#ifdef MOONHUT_FRIDGE
+    // MoonHut: DS18B20 probes are 1-Wire, so they sit outside the I2C sensor
+    // framework above and are merged in here.
+    //
+    // Stock EnvironmentMetrics carries exactly ONE `temperature` field, so probe #2
+    // rides in `soil_temperature` — it already exists in the protobuf and the phone
+    // app renders it, which beats a custom port needing a meshhub decoder. Probes
+    // beyond the second are shown on the panel but have nowhere to go in this
+    // message; they need a custom port if they ever have to leave the node.
+    if (moonFridgeModule && moonFridgeModule->probeCount() > 0) {
+        float c = 0.0f;
+        if (moonFridgeModule->getTempC(0, c)) {
+            m->variant.environment_metrics.temperature = c;
+            m->variant.environment_metrics.has_temperature = true;
+            valid = true;
+        }
+        if (moonFridgeModule->getTempC(1, c)) {
+            m->variant.environment_metrics.soil_temperature = c;
+            m->variant.environment_metrics.has_soil_temperature = true;
+            valid = true;
+        }
         hasSensor = true;
     }
 #endif

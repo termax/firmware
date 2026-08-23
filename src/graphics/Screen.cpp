@@ -35,6 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "draw/ClockRenderer.h"
 #include "draw/DebugRenderer.h"
 #include "draw/MenuHandler.h"
+#include "draw/FridgeRenderer.h"
 #include "draw/MessageRenderer.h"
 #include "draw/NodeListRenderer.h"
 #include "draw/NotificationRenderer.h"
@@ -1171,6 +1172,14 @@ void Screen::setFrames(FrameFocus focus)
         indicatorIcons.push_back(icon_home);
     }
 
+#ifdef MOONHUT_FRIDGE
+    // MoonHut: the probe-temperature frame. Registered before the sign frame so it
+    // is the lower index, but which one is HOME is decided in the focus switch below.
+    fsi.positions.fridge = numframes;
+    normalFrames[numframes++] = graphics::FridgeRenderer::drawFridgeFrame;
+    indicatorIcons.push_back(icon_mail);
+#endif
+
     fsi.positions.textMessage = numframes;
     normalFrames[numframes++] = graphics::MessageRenderer::drawTextMessageFrame;
     indicatorIcons.push_back(icon_mail);
@@ -1328,7 +1337,12 @@ void Screen::setFrames(FrameFocus focus)
     // Focus on a specific frame, in the frame set we just created
     switch (focus) {
     case FOCUS_DEFAULT:
-#ifdef MOONHUT_SIGN
+#if defined(MOONHUT_FRIDGE)
+        // MoonHut: on a fridge monitor the live temperature is the home screen — that
+        // is the whole point of the box. The sign frame and the stock Meshtastic frames
+        // stay reachable with the page button.
+        ui->switchToFrame(fsi.positions.fridge);
+#elif defined(MOONHUT_SIGN)
         // MoonHut: the sign (textMessage frame) is the home screen — it shows the last
         // message, or the screensaver when there is none. The stock Meshtastic frames
         // stay reachable with the page button.

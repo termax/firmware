@@ -701,6 +701,9 @@ class Screen : public concurrency::OSThread
             uint8_t gps = 255;
             uint8_t home = 255;
             uint8_t textMessage = 255;
+#ifdef MOONHUT_FRIDGE
+            uint8_t fridge = 255; // MoonHut: DS18B20 probe-temperature frame
+#endif
             uint8_t nodelist_nodes = 255;
             uint8_t nodelist_location = 255;
             uint8_t nodelist_lastheard = 255;
