@@ -36,6 +36,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "draw/DebugRenderer.h"
 #include "draw/MenuHandler.h"
 #include "draw/FridgeRenderer.h"
+#ifdef MOONHUT_FRIDGE
+#include "modules/MoonFridgeModule.h"
+#endif
 #include "draw/MessageRenderer.h"
 #include "draw/NodeListRenderer.h"
 #include "draw/NotificationRenderer.h"
@@ -1143,6 +1146,49 @@ void Screen::setFrames(FrameFocus focus)
 
     indicatorIcons.clear();
 
+#ifdef MOONHUT_FRIDGE_ONLY
+    // A dedicated appliance, not a Meshtastic node with a probe bolted on. The frameset
+    // is the overview plus one detail frame per known probe, and NOTHING else.
+    //
+    // This is a deliberate amputation. The stock carousel put the sign frame next to the
+    // fridge frame, and the sign swallowed the button press (its PRG page-flip returns
+    // true whenever a flash is active or a stale page table has more than one page), so
+    // one press left the temperature unreachable until a reboot. With only fridge frames
+    // in the ring there is nowhere to get stuck.
+    {
+        uint8_t nf = 0;
+        fsi.positions.fridge = nf;
+        normalFrames[nf++] = graphics::FridgeRenderer::drawFridgeFrame;
+
+        if (moonFridgeModule) {
+            for (uint8_t i = 0; i < moonFridgeModule->probeCount() && nf < MAX_NUM_NODES; i++) {
+                graphics::FridgeRenderer::ProbeFrameCallback cb = graphics::FridgeRenderer::probeFrameFor(i);
+                if (cb)
+                    normalFrames[nf++] = cb;
+            }
+        }
+
+        fsi.frameCount = nf;
+        this->frameCount = nf;
+        ui->setFrames(normalFrames, nf);
+        ui->disableAllIndicators();
+
+        static OverlayCallback fridgeOverlays[] = {NotificationRenderer::drawBannercallback};
+        ui->setOverlays(fridgeOverlays, sizeof(fridgeOverlays) / sizeof(fridgeOverlays[0]));
+
+        prevFrame = -1;
+
+        if (focus == FOCUS_PRESERVE && originalPosition < nf)
+            ui->switchToFrame(originalPosition);
+        else
+            ui->switchToFrame(fsi.positions.fridge); // the overview is home
+
+        this->framesetInfo = fsi;
+        setFastFramerate();
+        return;
+    }
+#endif
+
     size_t numframes = 0;
 
     // If we have a critical fault, show it first
@@ -1996,6 +2042,16 @@ int Screen::handleInputEvent(const InputEvent *event)
                        this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                 cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
             } else if (event->inputEvent == INPUT_BROKER_SELECT) {
+#ifdef MOONHUT_FRIDGE_ONLY
+                // One button, so a HOLD is the only gesture left for the thing you most
+                // want at 3am: shutting the buzzer up. It silences the sounder only - the
+                // alarm stays active and keeps being reported, so muting cannot hide a
+                // warm fridge from anyone downstream.
+                if (moonFridgeModule)
+                    moonFridgeModule->muteAlarm();
+                setFastFramerate();
+                return 0;
+#endif
 #ifdef MOONHUT_SIGN
                 // On a sign, a PRG HOLD (long-press = SELECT) on the message frame sends a
                 // read-receipt for the current message, not a menu (signs are keyboard-less).

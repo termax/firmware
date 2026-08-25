@@ -853,6 +853,17 @@ void NodeDB::initConfigIntervals()
     config.display.screen_on_secs = 30;
     config.power.wait_bluetooth_secs = 30;
 #endif
+
+#if defined(MOONHUT_FRIDGE_ONLY)
+    // A mains-powered fridge monitor must never blank. 0 is the documented e-ink kill
+    // switch: PowerFSM skips the ON->DARK transitions entirely at that value.
+    //
+    // This is not cosmetic. Once DARK is entered the Screen thread disables itself, and
+    // the module's forceDisplay() then pushes a stale buffer that the frame-hash check
+    // skips - so the panel froze on whatever it happened to be showing 10 minutes after
+    // boot, which is exactly the "when it sleeps it shows only P1" report.
+    config.display.screen_on_secs = 0;
+#endif
 }
 
 void NodeDB::installDefaultModuleConfig()

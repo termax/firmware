@@ -18,6 +18,33 @@ TextMessageModule *textMessageModule;
 
 ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp)
 {
+#ifdef MOONHUT_FRIDGE
+    // "fridge:<command>" is the remote-control surface: naming probes and setting their
+    // alarm bands, driven by meshhub's API. It is handled HERE, ahead of every screen
+    // path, precisely because it must not depend on MOONHUT_SIGN - the fridge build has
+    // no sign, and gating this behind one is how it silently disappeared before.
+    // The reply is DM'd back to the sender so the caller gets an ack it can parse.
+    if (moonFridgeModule && mp.decoded.payload.size > 7 &&
+        strncasecmp((const char *)mp.decoded.payload.bytes, "fridge:", 7) == 0) {
+        char body[160];
+        size_t n = mp.decoded.payload.size - 7;
+        if (n >= sizeof(body))
+            n = sizeof(body) - 1;
+        memcpy(body, mp.decoded.payload.bytes + 7, n);
+        body[n] = 0;
+
+        const char *result = moonFridgeModule->handleCommand(body);
+        if (mp.from) {
+            meshtastic_MeshPacket *reply = allocDataPacket();
+            reply->to = mp.from;
+            reply->channel = mp.channel;
+            reply->decoded.payload.size =
+                snprintf((char *)reply->decoded.payload.bytes, sizeof(reply->decoded.payload.bytes), "%s", result);
+            service->sendToMesh(reply, RX_SRC_LOCAL, false);
+        }
+        return ProcessMessage::STOP;
+    }
+#endif
 #if defined(DEBUG_PORT) && !defined(DEBUG_MUTE)
     auto &p = mp.decoded;
     LOG_INFO("Received text msg from=0x%0x, id=0x%x, msg=%.*s", mp.from, mp.id, p.payload.size, p.payload.bytes);
@@ -130,16 +157,6 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             // littlefs and shows it; a reboot restores it. Otherwise a normal sign message.
             if (strncmp(text, "sethome:", 8) == 0)
                 graphics::MessageRenderer::setMoonHome(text + 8);
-#ifdef MOONHUT_FRIDGE
-            // "fridgename:<slot>=<name>" maps an operator name onto a probe. The name is
-            // stored against that probe's ROM address, so it follows the physical probe
-            // when adding another one renumbers the slots. Also accepts "list"/"clear".
-            else if (strncmp(text, "fridgename:", 11) == 0 && moonFridgeModule) {
-                const char *result = moonFridgeModule->handleNameCommand(text + 11);
-                LOG_INFO("MoonFridge: %s", result);
-                graphics::MessageRenderer::setMoonFlashMessage(result, "fridge", 5000);
-            }
-#endif
             else
                 graphics::MessageRenderer::setMoonSignMessage(text, attr);
         } else

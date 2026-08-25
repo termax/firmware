@@ -5,6 +5,7 @@
 #ifdef MOONHUT_FRIDGE
 
 #include "concurrency/OSThread.h"
+#include "mesh/MeshTypes.h"
 #include <Arduino.h>
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -35,9 +36,19 @@
 #define MOONHUT_FRIDGE_NAME_LEN 14
 #endif
 
-// Alarm threshold in degrees C.
+// DEFAULT alarm thresholds in degrees C, used by a probe that has not been given its
+// own. A fridge at +4 and a freezer at -18 cannot share one limit, so every threshold
+// here is only a starting point - the real ones are per probe, keyed by ROM, and are
+// set remotely (see handleCommand).
 #ifndef MOONHUT_FRIDGE_HIGH_C
 #define MOONHUT_FRIDGE_HIGH_C 8.0f
+#endif
+
+// Too COLD is a real fault too: a fridge icing up, or a probe reading a freezer that
+// has been left open onto the coils. Default is far enough below anything real that it
+// never fires until someone sets it.
+#ifndef MOONHUT_FRIDGE_LOW_C
+#define MOONHUT_FRIDGE_LOW_C -40.0f
 #endif
 
 // How long the temperature must stay above the threshold before the buzzer
@@ -89,15 +100,22 @@ class MoonFridgeModule : public concurrency::OSThread
     /// otherwise the positional label. This is what the panel and the logs use.
     const char *probeName(uint8_t idx) const;
 
-    /// Map a name onto the probe currently in slot `idx` (0-based). The mapping is
-    /// stored against that probe's ROM address, not its slot, so it follows the
-    /// physical probe even when adding another one renumbers the slots. Persisted to
-    /// littlefs; survives reboots and reflashes. Empty name clears the mapping.
-    bool setProbeName(uint8_t idx, const char *name);
+    /// True if this probe answered the most recent bus scan.
+    bool probePresent(uint8_t idx) const { return idx < numProbes && probes[idx].present; }
 
-    /// Handle a "fridgename:" command body, e.g. "2=Freezer" or "clear".
-    /// Returns a short human-readable result for the reply/log.
-    const char *handleNameCommand(const char *body);
+    /// Per-probe alarm band, for the display.
+    bool probeBand(uint8_t idx, float &hiC, float &loC) const;
+
+    /// True while THIS probe is outside its band and has served its dwell.
+    bool probeAlarming(uint8_t idx) const;
+
+    /// Handle a "fridge:" command body, e.g. "name 2=Freezer", "hi Freezer=-15",
+    /// "list", "forget 2". Returns a short human-readable result for the reply.
+    const char *handleCommand(const char *body);
+
+    /// Silence a sounding buzzer until the next distinct alarm event. Bound to a long
+    /// press; deliberately does NOT clear the alarm state or stop reporting it.
+    void muteAlarm();
 
   protected:
     int32_t runOnce() override;
@@ -105,20 +123,38 @@ class MoonFridgeModule : public concurrency::OSThread
   private:
     enum class Phase { Convert, Read };
 
+    // One entry per probe we have EVER seen. Deliberately sticky: a probe that misses a
+    // bus scan keeps its slot, its name, its thresholds and its screen frame, and simply
+    // reads as absent. Removing it on a missed scan is what made the panel reflow 2->1->2
+    // and made a whole column vanish with nothing logged.
     struct Probe {
         DeviceAddress addr = {};
+        char name[MOONHUT_FRIDGE_NAME_LEN] = {};
         float tempC = NAN;
-        bool valid = false;
+        float hiC = MOONHUT_FRIDGE_HIGH_C;
+        float loC = MOONHUT_FRIDGE_LOW_C;
+        uint32_t dwellS = MOONHUT_FRIDGE_DWELL_S;
+        bool valid = false;        // last read produced a usable temperature
+        bool present = false;      // answered the most recent bus scan
         bool configured = false;   // 12-bit resolution has been pushed to this probe
+        bool warmingUp = false;    // joined but has not completed its first conversion
+        bool faultReported = false;
+        bool alarmReported = false;
+        uint8_t missedScans = 0;
         uint32_t lastGoodMs = 0;
-        uint32_t aboveSinceMs = 0; // 0 = not currently above the threshold
+        uint32_t aboveSinceMs = 0; // 0 = not currently outside its band
     };
 
     void enumerate();
-    void loadNames();
-    void saveNames();
-    int8_t nameSlotForRom(const DeviceAddress addr) const;
+    void loadProbes();
+    void saveProbes();
+    int8_t findRom(const DeviceAddress addr) const;
+    int8_t resolveProbe(const char *token) const; // slot number or name
     void scanCandidatePins();
+    void report(uint32_t now, bool force);
+    void sendLine(const char *text);
+    void sendEnvironmentMetrics();
+    void rebuildFrames();
     void readAll();
     void evaluate(uint32_t now);
     void serviceBuzzer(uint32_t now);
@@ -147,15 +183,12 @@ class MoonFridgeModule : public concurrency::OSThread
     uint8_t shownCount = 0xFF; // 0xFF = nothing painted yet
     bool shownAlarm = false;
 
-    // ROM -> operator-assigned name. Kept separate from `probes` because a name must
-    // outlive the probe being unplugged, and must not move when the slots renumber.
-    struct NameMap {
-        DeviceAddress addr = {};
-        char name[MOONHUT_FRIDGE_NAME_LEN] = {};
-        bool used = false;
-    };
-    NameMap names[MOONHUT_FRIDGE_MAX_PROBES];
-    bool namesLoaded = false;
+    bool probesLoaded = false;
+    bool alarmMuted = false;
+    uint8_t framesBuiltFor = 0xFF; // roster size the frameset was last built for
+    uint32_t nextReportAt = 0;
+    float reportedC[MOONHUT_FRIDGE_MAX_PROBES] = {};
+    NodeNum reportDest = 0; // 0 = the default gateway
 };
 
 extern MoonFridgeModule *moonFridgeModule;
