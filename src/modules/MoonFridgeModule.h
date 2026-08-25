@@ -28,6 +28,13 @@
 #define MOONHUT_FRIDGE_MAX_PROBES 4
 #endif
 
+// Longest operator-assigned probe name, including the terminator. Kept short on
+// purpose: it is drawn above the temperature in a column that is only a quarter of
+// a 296 px panel wide when four probes are fitted.
+#ifndef MOONHUT_FRIDGE_NAME_LEN
+#define MOONHUT_FRIDGE_NAME_LEN 14
+#endif
+
 // Alarm threshold in degrees C.
 #ifndef MOONHUT_FRIDGE_HIGH_C
 #define MOONHUT_FRIDGE_HIGH_C 8.0f
@@ -74,9 +81,23 @@ class MoonFridgeModule : public concurrency::OSThread
     /// and a screaming box because a connector wiggled is worse than useless.
     bool probeFault() const;
 
-    /// Short label for a probe, for the display: "P1", "P2"... Probes are sorted
-    /// by ROM address so the numbering is stable across reboots.
+    /// Short fallback label for a probe: "P1", "P2"... Probes are sorted by ROM
+    /// address so the numbering is stable across reboots.
     static const char *probeLabel(uint8_t idx);
+
+    /// What to call this probe: the operator's name for it if one has been mapped,
+    /// otherwise the positional label. This is what the panel and the logs use.
+    const char *probeName(uint8_t idx) const;
+
+    /// Map a name onto the probe currently in slot `idx` (0-based). The mapping is
+    /// stored against that probe's ROM address, not its slot, so it follows the
+    /// physical probe even when adding another one renumbers the slots. Persisted to
+    /// littlefs; survives reboots and reflashes. Empty name clears the mapping.
+    bool setProbeName(uint8_t idx, const char *name);
+
+    /// Handle a "fridgename:" command body, e.g. "2=Freezer" or "clear".
+    /// Returns a short human-readable result for the reply/log.
+    const char *handleNameCommand(const char *body);
 
   protected:
     int32_t runOnce() override;
@@ -88,11 +109,15 @@ class MoonFridgeModule : public concurrency::OSThread
         DeviceAddress addr = {};
         float tempC = NAN;
         bool valid = false;
+        bool configured = false;   // 12-bit resolution has been pushed to this probe
         uint32_t lastGoodMs = 0;
         uint32_t aboveSinceMs = 0; // 0 = not currently above the threshold
     };
 
     void enumerate();
+    void loadNames();
+    void saveNames();
+    int8_t nameSlotForRom(const DeviceAddress addr) const;
     void scanCandidatePins();
     void readAll();
     void evaluate(uint32_t now);
@@ -115,8 +140,22 @@ class MoonFridgeModule : public concurrency::OSThread
     bool alarm = false;
     uint32_t nextBeepAt = 0;
 
-    float shownC = NAN;      // what the panel is currently displaying
-    bool shownAlarm = false; // ...and which alarm state it was painted with
+    // What the panel is currently displaying, per probe. Tracking only probe 0 here
+    // was a real bug: the renderer draws every probe, so a screen that only repaints
+    // when probe 0 moves leaves every other probe's number visibly stale.
+    float shownC[MOONHUT_FRIDGE_MAX_PROBES] = {};
+    uint8_t shownCount = 0xFF; // 0xFF = nothing painted yet
+    bool shownAlarm = false;
+
+    // ROM -> operator-assigned name. Kept separate from `probes` because a name must
+    // outlive the probe being unplugged, and must not move when the slots renumber.
+    struct NameMap {
+        DeviceAddress addr = {};
+        char name[MOONHUT_FRIDGE_NAME_LEN] = {};
+        bool used = false;
+    };
+    NameMap names[MOONHUT_FRIDGE_MAX_PROBES];
+    bool namesLoaded = false;
 };
 
 extern MoonFridgeModule *moonFridgeModule;

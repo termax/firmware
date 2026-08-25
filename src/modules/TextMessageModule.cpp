@@ -10,6 +10,9 @@
 #include "graphics/Screen.h"
 #include "graphics/SharedUIDisplay.h"
 #include "graphics/draw/MessageRenderer.h"
+#ifdef MOONHUT_FRIDGE
+#include "modules/MoonFridgeModule.h"
+#endif
 #include "main.h"
 TextMessageModule *textMessageModule;
 
@@ -127,6 +130,16 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             // littlefs and shows it; a reboot restores it. Otherwise a normal sign message.
             if (strncmp(text, "sethome:", 8) == 0)
                 graphics::MessageRenderer::setMoonHome(text + 8);
+#ifdef MOONHUT_FRIDGE
+            // "fridgename:<slot>=<name>" maps an operator name onto a probe. The name is
+            // stored against that probe's ROM address, so it follows the physical probe
+            // when adding another one renumbers the slots. Also accepts "list"/"clear".
+            else if (strncmp(text, "fridgename:", 11) == 0 && moonFridgeModule) {
+                const char *result = moonFridgeModule->handleNameCommand(text + 11);
+                LOG_INFO("MoonFridge: %s", result);
+                graphics::MessageRenderer::setMoonFlashMessage(result, "fridge", 5000);
+            }
+#endif
             else
                 graphics::MessageRenderer::setMoonSignMessage(text, attr);
         } else

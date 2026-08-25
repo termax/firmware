@@ -2,6 +2,7 @@
 
 #ifdef MOONHUT_FRIDGE
 
+#include "FSCommon.h" // littlefs: persist the ROM -> probe-name mapping
 #include "NodeDB.h"
 #include "configuration.h"
 #include <string.h>
@@ -26,6 +27,17 @@ static constexpr uint32_t CONVERSION_MS = 800;
 // Re-scan the bus this often while no probe is present, so a probe plugged in
 // after boot is picked up without a reboot.
 static constexpr uint32_t RESCAN_MS = 30 * 1000UL;
+
+// ...and this often once probes ARE present. The bus used to be scanned only while
+// numProbes == 0, which meant a probe added to a running node stayed invisible until
+// the next reboot, and one that dropped out could never come back. Worse, a probe
+// that happened not to answer during the single boot-time scan vanished with no log
+// line and no "--" on the panel - it simply was not there. Slower than RESCAN_MS
+// because a search costs bus time that the sampling cycle would rather have.
+static constexpr uint32_t RESCAN_PRESENT_MS = 60 * 1000UL;
+
+// Where the ROM -> name mapping lives on littlefs.
+static const char *NAMES_PATH = "/fridgenames";
 
 // A probe that has not produced a good reading for this long counts as faulted.
 static constexpr uint32_t FAULT_AFTER_MS = 5 * 60 * 1000UL;
@@ -60,64 +72,285 @@ bool MoonFridgeModule::plausible(float c)
 
 void MoonFridgeModule::enumerate()
 {
-    numProbes = 0;
+    loadNames();
     sensors.begin(); // re-runs the bus search
 
-    uint8_t found = sensors.getDeviceCount();
-    for (uint8_t i = 0; i < found && numProbes < MOONHUT_FRIDGE_MAX_PROBES; i++) {
+    // Build the new set first, then diff it against the old one. Rebuilding in place
+    // would throw away every dwell timer on each rescan, and with a 15 minute dwell
+    // the alarm would then never be able to arm.
+    Probe found[MOONHUT_FRIDGE_MAX_PROBES];
+    uint8_t n = 0;
+
+    uint8_t count = sensors.getDeviceCount();
+    for (uint8_t i = 0; i < count && n < MOONHUT_FRIDGE_MAX_PROBES; i++) {
         DeviceAddress addr;
         if (!sensors.getAddress(addr, i))
             continue;
-        memcpy(probes[numProbes].addr, addr, sizeof(DeviceAddress));
-        probes[numProbes].valid = false;
-        probes[numProbes].tempC = NAN;
-        probes[numProbes].lastGoodMs = 0;
-        probes[numProbes].aboveSinceMs = 0;
-        numProbes++;
+
+        Probe p;
+        memcpy(p.addr, addr, sizeof(DeviceAddress));
+
+        // Carry state forward for a ROM we already knew.
+        for (uint8_t j = 0; j < numProbes; j++) {
+            if (memcmp(probes[j].addr, addr, sizeof(DeviceAddress)) == 0) {
+                p = probes[j];
+                break;
+            }
+        }
+        found[n++] = p;
     }
 
-    // Sort by ROM address so probe numbering is STABLE across reboots. Bus search
-    // order is address-ordered in practice, but relying on that would mean the
-    // fridge and the freezer could silently swap identities after a power cut.
-    for (uint8_t i = 1; i < numProbes; i++) {
-        Probe key = probes[i];
+    // Sort by ROM address so slot numbering is stable across reboots. Names are keyed
+    // by ROM, so a probe keeps its name even when this reorders the slots.
+    for (uint8_t i = 1; i < n; i++) {
+        Probe key = found[i];
         int8_t j = i - 1;
-        while (j >= 0 && memcmp(probes[j].addr, key.addr, sizeof(DeviceAddress)) > 0) {
-            probes[j + 1] = probes[j];
+        while (j >= 0 && memcmp(found[j].addr, key.addr, sizeof(DeviceAddress)) > 0) {
+            found[j + 1] = found[j];
             j--;
         }
-        probes[j + 1] = key;
+        found[j + 1] = key;
     }
 
+    // Announce departures before we lose the old set...
     for (uint8_t i = 0; i < numProbes; i++) {
-        // 12-bit: 0.0625 C steps. Worth the 750 ms on a sensor read every 30 s.
-        sensors.setResolution(probes[i].addr, 12);
-        const uint8_t *a = probes[i].addr;
-        LOG_INFO("MoonFridge: probe %s rom %02x%02x%02x%02x%02x%02x%02x%02x", probeLabel(i), a[0], a[1], a[2], a[3], a[4], a[5],
-                 a[6], a[7]);
+        bool stillHere = false;
+        for (uint8_t j = 0; j < n; j++)
+            if (memcmp(probes[i].addr, found[j].addr, sizeof(DeviceAddress)) == 0)
+                stillHere = true;
+        if (!stillHere)
+            LOG_WARN("MoonFridge: probe %s LEFT the bus", probeName(i));
     }
 
-    if (numProbes == 0) {
-        LOG_WARN("MoonFridge: no DS18B20 found on GPIO %d - check the 4.7k pullup and the data wire", MOONHUT_ONEWIRE_PIN);
+    const uint8_t prevCount = numProbes;
+    DeviceAddress prevAddrs[MOONHUT_FRIDGE_MAX_PROBES];
+    for (uint8_t i = 0; i < prevCount; i++)
+        memcpy(prevAddrs[i], probes[i].addr, sizeof(DeviceAddress));
 
-        // Raw presence-pulse test on the configured pin. This separates "nothing is
-        // electrically alive on the bus" from "a device answers but its ROM will not
-        // read" - two faults with completely different causes that otherwise look
-        // identical from the enumerate() result.
-        if (wire.reset())
-            LOG_WARN("MoonFridge: GPIO %d DOES see a presence pulse - a device is alive but its ROM will not read "
-                     "(marginal pullup, or a counterfeit part)",
-                     MOONHUT_ONEWIRE_PIN);
-        else
-            LOG_WARN("MoonFridge: GPIO %d sees NO presence pulse - nothing is answering. Either DATA does not reach the "
-                     "probe, the probe has no power, or the probe is dead. (VDD and a pulled-up DATA both measure 3.3 V, "
-                     "so a meter cannot tell them apart - check with ohms, power off.)",
-                     MOONHUT_ONEWIRE_PIN);
+    for (uint8_t i = 0; i < n; i++)
+        probes[i] = found[i];
+    numProbes = n;
 
-        scanCandidatePins();
-    } else {
+    // ...and arrivals once the new set is live, so probeName() can name them.
+    for (uint8_t i = 0; i < numProbes; i++) {
+        bool isNew = true;
+        for (uint8_t j = 0; j < prevCount; j++)
+            if (memcmp(probes[i].addr, prevAddrs[j], sizeof(DeviceAddress)) == 0)
+                isNew = false;
+
+        if (!probes[i].configured) {
+            // 12-bit: 0.0625 C steps. Worth the 750 ms on a sensor read every 30 s.
+            sensors.setResolution(probes[i].addr, 12);
+            probes[i].configured = true;
+        }
+
+        if (isNew) {
+            const uint8_t *a = probes[i].addr;
+            LOG_INFO("MoonFridge: probe %s JOINED, slot %u, rom %02x%02x%02x%02x%02x%02x%02x%02x", probeName(i), i + 1, a[0],
+                     a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+        }
+    }
+
+    if (numProbes != prevCount)
         LOG_INFO("MoonFridge: %u probe(s) on GPIO %d", numProbes, MOONHUT_ONEWIRE_PIN);
+
+    if (numProbes != 0)
+        return;
+
+    LOG_WARN("MoonFridge: no DS18B20 found on GPIO %d - check the 4.7k pullup and the data wire", MOONHUT_ONEWIRE_PIN);
+
+    // Raw presence-pulse test on the configured pin. This separates "nothing is
+    // electrically alive on the bus" from "a device answers but its ROM will not
+    // read" - two faults with completely different causes that otherwise look
+    // identical from the enumerate() result.
+    if (wire.reset())
+        LOG_WARN("MoonFridge: GPIO %d DOES see a presence pulse - a device is alive but its ROM will not read "
+                 "(marginal pullup, or a counterfeit part)",
+                 MOONHUT_ONEWIRE_PIN);
+    else
+        LOG_WARN("MoonFridge: GPIO %d sees NO presence pulse - nothing is answering. Either DATA does not reach the "
+                 "probe, the probe has no power, or the probe is dead. (VDD and a pulled-up DATA both measure 3.3 V, "
+                 "so a meter cannot tell them apart - check with ohms, power off.)",
+                 MOONHUT_ONEWIRE_PIN);
+
+    scanCandidatePins();
+}
+
+// --------------------------------------------------------------------------
+// Probe names
+//
+// A name is stored against a probe's 64-bit ROM address, never against its slot.
+// Slots are sorted by ROM and therefore renumber whenever a probe is added or
+// removed - so a slot-keyed name would silently relabel "Fridge" as "Freezer" the
+// first time someone hangs a second probe on the bus.
+// --------------------------------------------------------------------------
+
+int8_t MoonFridgeModule::nameSlotForRom(const DeviceAddress addr) const
+{
+    for (uint8_t i = 0; i < MOONHUT_FRIDGE_MAX_PROBES; i++)
+        if (names[i].used && memcmp(names[i].addr, addr, sizeof(DeviceAddress)) == 0)
+            return (int8_t)i;
+    return -1;
+}
+
+const char *MoonFridgeModule::probeName(uint8_t idx) const
+{
+    if (idx >= numProbes)
+        return probeLabel(idx);
+    int8_t slot = nameSlotForRom(probes[idx].addr);
+    return (slot >= 0 && names[slot].name[0]) ? names[slot].name : probeLabel(idx);
+}
+
+void MoonFridgeModule::loadNames()
+{
+    if (namesLoaded)
+        return;
+    namesLoaded = true;
+
+    auto f = FSCom.open(NAMES_PATH, FILE_O_READ);
+    if (!f)
+        return; // nothing mapped yet - probes fall back to P1/P2/...
+
+    // One "<16 hex rom>=<name>" per line.
+    char buf[256] = {};
+    size_t n = f.read((uint8_t *)buf, sizeof(buf) - 1);
+    f.close();
+    if (n == 0)
+        return;
+    buf[n] = 0;
+
+    uint8_t slot = 0;
+    for (char *line = strtok(buf, "\n"); line && slot < MOONHUT_FRIDGE_MAX_PROBES; line = strtok(nullptr, "\n")) {
+        char *eq = strchr(line, '=');
+        if (!eq || (eq - line) != 16)
+            continue;
+        *eq = 0;
+
+        DeviceAddress addr;
+        bool ok = true;
+        for (uint8_t i = 0; i < sizeof(DeviceAddress); i++) {
+            char pair[3] = {line[i * 2], line[i * 2 + 1], 0};
+            char *endp = nullptr;
+            long v = strtol(pair, &endp, 16);
+            if (endp != pair + 2) {
+                ok = false;
+                break;
+            }
+            addr[i] = (uint8_t)v;
+        }
+        if (!ok)
+            continue;
+
+        memcpy(names[slot].addr, addr, sizeof(DeviceAddress));
+        strncpy(names[slot].name, eq + 1, MOONHUT_FRIDGE_NAME_LEN - 1);
+        names[slot].name[MOONHUT_FRIDGE_NAME_LEN - 1] = 0;
+        names[slot].used = true;
+        slot++;
     }
+    LOG_INFO("MoonFridge: loaded %u probe name(s)", slot);
+}
+
+void MoonFridgeModule::saveNames()
+{
+    char buf[256];
+    size_t len = 0;
+    for (uint8_t i = 0; i < MOONHUT_FRIDGE_MAX_PROBES; i++) {
+        if (!names[i].used || !names[i].name[0])
+            continue;
+        const uint8_t *a = names[i].addr;
+        int w = snprintf(buf + len, sizeof(buf) - len, "%02x%02x%02x%02x%02x%02x%02x%02x=%s\n", a[0], a[1], a[2], a[3], a[4],
+                         a[5], a[6], a[7], names[i].name);
+        if (w <= 0 || (size_t)w >= sizeof(buf) - len)
+            break;
+        len += (size_t)w;
+    }
+
+    auto f = FSCom.open(NAMES_PATH, FILE_O_WRITE);
+    if (!f) {
+        LOG_ERROR("MoonFridge: could not write %s", NAMES_PATH);
+        return;
+    }
+    if (len)
+        f.write((const uint8_t *)buf, len);
+    f.close();
+}
+
+bool MoonFridgeModule::setProbeName(uint8_t idx, const char *name)
+{
+    loadNames();
+    if (idx >= numProbes)
+        return false;
+
+    int8_t slot = nameSlotForRom(probes[idx].addr);
+    if (slot < 0) {
+        for (uint8_t i = 0; i < MOONHUT_FRIDGE_MAX_PROBES && slot < 0; i++)
+            if (!names[i].used)
+                slot = (int8_t)i;
+    }
+    if (slot < 0)
+        return false;
+
+    memcpy(names[slot].addr, probes[idx].addr, sizeof(DeviceAddress));
+    if (name && name[0]) {
+        strncpy(names[slot].name, name, MOONHUT_FRIDGE_NAME_LEN - 1);
+        names[slot].name[MOONHUT_FRIDGE_NAME_LEN - 1] = 0;
+        names[slot].used = true;
+    } else {
+        names[slot].name[0] = 0;
+        names[slot].used = false;
+    }
+
+    saveNames();
+    shownCount = 0xFF; // force the panel to repaint with the new label
+    LOG_INFO("MoonFridge: slot %u is now \"%s\"", idx + 1, probeName(idx));
+    return true;
+}
+
+const char *MoonFridgeModule::handleNameCommand(const char *body)
+{
+    static char reply[96];
+    loadNames();
+
+    while (*body == ' ')
+        body++;
+
+    if (strncmp(body, "list", 4) == 0 || !*body) {
+        int len = snprintf(reply, sizeof(reply), "%u probe(s):", numProbes);
+        for (uint8_t i = 0; i < numProbes && len > 0 && (size_t)len < sizeof(reply); i++)
+            len += snprintf(reply + len, sizeof(reply) - len, " %u=%s", i + 1, probeName(i));
+        return reply;
+    }
+
+    if (strncmp(body, "clear", 5) == 0) {
+        for (uint8_t i = 0; i < MOONHUT_FRIDGE_MAX_PROBES; i++) {
+            names[i].used = false;
+            names[i].name[0] = 0;
+        }
+        saveNames();
+        shownCount = 0xFF;
+        snprintf(reply, sizeof(reply), "all probe names cleared");
+        return reply;
+    }
+
+    // "<slot>=<name>", slot being the 1-based number shown on the panel.
+    char *eq = (char *)strchr(body, '=');
+    if (!eq) {
+        snprintf(reply, sizeof(reply), "use fridgename:<slot>=<name>, or list/clear");
+        return reply;
+    }
+
+    long slot = strtol(body, nullptr, 10);
+    if (slot < 1 || slot > numProbes) {
+        snprintf(reply, sizeof(reply), "no probe in slot %ld (%u present)", slot, numProbes);
+        return reply;
+    }
+
+    if (!setProbeName((uint8_t)(slot - 1), eq + 1)) {
+        snprintf(reply, sizeof(reply), "could not name slot %ld", slot);
+        return reply;
+    }
+    snprintf(reply, sizeof(reply), "slot %ld is now \"%s\"", slot, probeName((uint8_t)(slot - 1)));
+    return reply;
 }
 
 // Diagnostic: when the configured pin finds nothing, try every other GPIO that is
@@ -195,7 +428,7 @@ void MoonFridgeModule::readAll()
             probes[i].lastGoodMs = now;
         } else {
             probes[i].valid = false;
-            LOG_WARN("MoonFridge: %s bad read (%.1f C)", probeLabel(i), c);
+            LOG_WARN("MoonFridge: %s bad read (%.1f C)", probeName(i), c);
         }
     }
 }
@@ -218,14 +451,14 @@ void MoonFridgeModule::evaluate(uint32_t now)
         if (p.tempC > MOONHUT_FRIDGE_HIGH_C) {
             if (p.aboveSinceMs == 0) {
                 p.aboveSinceMs = now;
-                LOG_INFO("MoonFridge: %s above %.1f C (%.1f) - dwell started", probeLabel(i), (double)MOONHUT_FRIDGE_HIGH_C,
+                LOG_INFO("MoonFridge: %s above %.1f C (%.1f) - dwell started", probeName(i), (double)MOONHUT_FRIDGE_HIGH_C,
                          p.tempC);
             }
             if ((now - p.aboveSinceMs) >= (MOONHUT_FRIDGE_DWELL_S * 1000UL))
                 anyLatched = true;
         } else if (p.tempC < clearAt) {
             if (p.aboveSinceMs != 0)
-                LOG_INFO("MoonFridge: %s back below %.1f C (%.1f) - cleared", probeLabel(i), (double)clearAt, p.tempC);
+                LOG_INFO("MoonFridge: %s back below %.1f C (%.1f) - cleared", probeName(i), (double)clearAt, p.tempC);
             p.aboveSinceMs = 0;
         }
         // Between clearAt and HIGH_C: hold current state (this is the hysteresis band).
@@ -278,21 +511,30 @@ void MoonFridgeModule::maybeRefreshDisplay()
     if (!screen)
         return;
 
-    float c = 0.0f;
-    const bool haveReading = getTempC(0, c);
+    // Every probe gets a vote. Comparing only probe 0 (as this did) meant a second
+    // probe's number was repainted solely when the FIRST one happened to drift past
+    // the delta - so on a stable fridge it looked frozen for minutes at a time and
+    // only caught up on a reboot or an unrelated refresh.
+    bool changed = (alarm != shownAlarm) || (numProbes != shownCount);
 
-    bool changed = (alarm != shownAlarm);
-    if (haveReading) {
-        if (isnan(shownC) || fabsf(c - shownC) >= REDRAW_DELTA_C)
-            changed = true;
-    } else if (!isnan(shownC)) {
-        changed = true; // reading was lost - stop showing a stale number
+    for (uint8_t i = 0; i < numProbes && !changed; i++) {
+        float c = 0.0f;
+        if (getTempC(i, c)) {
+            if (isnan(shownC[i]) || fabsf(c - shownC[i]) >= REDRAW_DELTA_C)
+                changed = true;
+        } else if (!isnan(shownC[i])) {
+            changed = true; // reading was lost - stop showing a stale number
+        }
     }
 
     if (!changed)
         return;
 
-    shownC = haveReading ? c : NAN;
+    for (uint8_t i = 0; i < MOONHUT_FRIDGE_MAX_PROBES; i++) {
+        float c = 0.0f;
+        shownC[i] = (i < numProbes && getTempC(i, c)) ? c : NAN;
+    }
+    shownCount = numProbes;
     shownAlarm = alarm;
     screen->forceDisplay();
 #endif
@@ -332,6 +574,16 @@ int32_t MoonFridgeModule::runOnce()
             nextEnumerateAt = now + RESCAN_MS;
         }
         return RESCAN_MS;
+    }
+
+    // Keep scanning even once probes are present, so adding or losing one no longer
+    // needs a reboot. Only between sample cycles: a bus search during a conversion
+    // would corrupt the reading being collected.
+    if (phase == Phase::Convert && (int32_t)(now - nextEnumerateAt) >= 0) {
+        enumerate();
+        nextEnumerateAt = now + RESCAN_PRESENT_MS;
+        if (numProbes == 0)
+            return RESCAN_MS;
     }
 
     switch (phase) {
