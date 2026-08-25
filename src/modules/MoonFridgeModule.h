@@ -147,6 +147,9 @@ class MoonFridgeModule : public concurrency::OSThread
         bool alarmReported = false;
         uint8_t missedScans = 0;
         uint8_t badReads = 0;      // consecutive rejected readings
+        uint32_t glitches = 0;     // lifetime rejected readings - a degrading joint shows
+                                   // up here as a rising rate long before it fails
+        uint32_t alarmSentMs = 0;  // last time this probe's alarm was announced
         uint32_t lastGoodMs = 0;
         uint32_t aboveSinceMs = 0; // 0 = not currently outside its band
     };
@@ -158,6 +161,9 @@ class MoonFridgeModule : public concurrency::OSThread
     int8_t resolveProbe(const char *token) const; // slot number or name
     void scanCandidatePins();
     void report(uint32_t now, bool force);
+    void sendConfigReport();
+    void sendSegmented(const char *prefix, char *body);
+    void bumpEpoch();
     void sendLine(const char *text);
     void sendEnvironmentMetrics();
     void rebuildFrames();
@@ -194,6 +200,11 @@ class MoonFridgeModule : public concurrency::OSThread
     bool alarmMuted = false;
     uint8_t framesBuiltFor = 0xFF; // roster size the frameset was last built for
     uint32_t nextReportAt = 0;
+    uint32_t nextCfgReportAt = 0;
+    // Bumped on every configuration change and carried in every heartbeat, so a listener
+    // can tell at a glance whether the settings it believes in are the ones in force -
+    // without needing to have caught the reply that changed them.
+    uint32_t configEpoch = 0;
     float reportedC[MOONHUT_FRIDGE_MAX_PROBES] = {};
     NodeNum reportDest = 0; // 0 = the default gateway
 };

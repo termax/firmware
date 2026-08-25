@@ -2041,6 +2041,17 @@ int Screen::handleInputEvent(const InputEvent *event)
             } else if ((event->inputEvent == INPUT_BROKER_UP || event->inputEvent == INPUT_BROKER_DOWN) &&
                        this->ui->getUiState()->currentFrame == framesetInfo.positions.home) {
                 cannedMessageModule->LaunchWithDestination(NODENUM_BROADCAST);
+            } else if (event->inputEvent == INPUT_BROKER_ALT_PRESS || event->inputEvent == INPUT_BROKER_ALT_LONG) {
+#ifdef MOONHUT_FRIDGE_ONLY
+                // The second hardware button (GPIO 21) is the one labelled RST on the
+                // case. Stock firmware pages the display with it, which from the front
+                // is indistinguishable from the panel glitching. Make it do what the
+                // label promises instead. Nothing is lost on a reboot: the probe roster,
+                // names and thresholds all live on littlefs.
+                LOG_INFO("MoonFridge: RST button pressed - rebooting");
+                rebootAtMsec = millis() + 500;
+                return 0;
+#endif
             } else if (event->inputEvent == INPUT_BROKER_SELECT) {
 #ifdef MOONHUT_FRIDGE_ONLY
                 // One button, so a HOLD is the only gesture left for the thing you most

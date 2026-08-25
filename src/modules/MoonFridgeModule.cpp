@@ -67,6 +67,16 @@ static constexpr uint32_t FAULT_AFTER_MS = 5 * 60 * 1000UL;
 static constexpr uint32_t REPORT_PERIOD_MS = 5 * 60 * 1000UL;
 static constexpr float REPORT_DELTA_C = 0.5f;
 
+// The full configuration goes out on a slower cycle, and immediately on any change.
+// Names and bands are far too big to repeat every heartbeat once there are a dozen
+// probes, but a listener that misses a change must still converge without asking.
+static constexpr uint32_t CFG_REPORT_PERIOD_MS = 30 * 60 * 1000UL;
+
+// An alarm is re-announced this often while it stays latched. Announcing once and
+// trusting the radio is how a warm fridge goes unnoticed all night: we have already
+// watched single packets go missing on this link.
+static constexpr uint32_t ALARM_REPEAT_MS = 5 * 60 * 1000UL;
+
 static constexpr uint32_t BEEP_PERIOD_MS = 3000;
 static constexpr uint16_t BEEP_FREQ_HZ = 2400;
 static constexpr uint32_t BEEP_LEN_MS = 250;
@@ -360,6 +370,7 @@ void MoonFridgeModule::readAll()
             continue;
 
         p.badReads++;
+        p.glitches++;
         if (p.valid && p.badReads < BAD_READS_TO_INVALIDATE && (now - p.lastGoodMs) < HOLD_LAST_GOOD_MS) {
             // Ride it out on the last good value. This is the whole point: a glitch
             // must not blank the panel or fire a fault for one bad slot.
@@ -402,12 +413,19 @@ void MoonFridgeModule::evaluate(uint32_t now)
             }
             if ((now - p.aboveSinceMs) >= (p.dwellS * 1000UL)) {
                 anyLatched = true;
-                if (!p.alarmReported) {
-                    p.alarmReported = true;
-                    alarmMuted = false; // a NEW probe going into alarm always re-arms the buzzer
+                const bool isNew = !p.alarmReported;
+                // Re-announce while it stays latched. Announcing once and trusting the
+                // radio is exactly how a warm fridge goes unnoticed overnight - we have
+                // already watched single packets vanish on this link.
+                if (isNew || (now - p.alarmSentMs) >= ALARM_REPEAT_MS) {
+                    if (isNew) {
+                        p.alarmReported = true;
+                        alarmMuted = false; // a NEW probe alarming always re-arms the buzzer
+                    }
+                    p.alarmSentMs = now;
                     char msg[96];
-                    snprintf(msg, sizeof(msg), "FRIDGE ALARM|%s|%.1f|%s=%.1f", probeName(i), p.tempC,
-                             tooWarm ? "hi" : "lo", (double)(tooWarm ? p.hiC : p.loC));
+                    snprintf(msg, sizeof(msg), "FRIDGE ALARM|%s|%.1f|%s=%.1f%s", probeName(i), p.tempC,
+                             tooWarm ? "hi" : "lo", (double)(tooWarm ? p.hiC : p.loC), isNew ? "" : "|repeat");
                     sendLine(msg);
                 }
             }
@@ -589,6 +607,68 @@ void MoonFridgeModule::sendEnvironmentMetrics()
     service->sendToMesh(p, RX_SRC_LOCAL, false);
 }
 
+// Split a long body across as many packets as it needs. A LoRa text payload tops out
+// around 230 bytes; sixteen probes' worth of names and bands does not fit in one, and
+// silently truncating configuration would be worse than sending nothing.
+void MoonFridgeModule::sendSegmented(const char *prefix, char *body)
+{
+    char packet[220];
+    size_t used = 0;
+    int wrote = snprintf(packet, sizeof(packet), "%s", prefix);
+    used = (wrote > 0) ? (size_t)wrote : 0;
+    const size_t headLen = used;
+
+    for (char *field = strtok(body, "\x1f"); field; field = strtok(nullptr, "\x1f")) {
+        const size_t need = strlen(field) + 1;
+        if (used + need >= sizeof(packet) - 1) {
+            sendLine(packet);
+            used = headLen;
+            packet[used] = 0;
+        }
+        int w = snprintf(packet + used, sizeof(packet) - used, "|%s", field);
+        if (w > 0)
+            used += (size_t)w;
+    }
+    if (used > headLen)
+        sendLine(packet);
+}
+
+void MoonFridgeModule::sendConfigReport()
+{
+    if (numProbes == 0)
+        return;
+
+    // name=hi/lo/dwell/glitches. The glitch count rides along because a joint that is
+    // slowly degrading shows up as a rising rate here long before it fails outright -
+    // which the read filter would otherwise hide completely.
+    char body[768];
+    size_t len = 0;
+    for (uint8_t i = 0; i < numProbes && len < sizeof(body) - 1; i++) {
+        int w = snprintf(body + len, sizeof(body) - len, "%s%s=%.1f/%.1f/%u/%u", len ? "\x1f" : "", probeName(i),
+                         (double)probes[i].hiC, (double)probes[i].loC, (unsigned)probes[i].dwellS,
+                         (unsigned)probes[i].glitches);
+        if (w <= 0)
+            break;
+        len += (size_t)w;
+    }
+
+    char prefix[24];
+    snprintf(prefix, sizeof(prefix), "FRIDGECFG v%u", (unsigned)configEpoch);
+    sendSegmented(prefix, body);
+    nextCfgReportAt = millis() + CFG_REPORT_PERIOD_MS;
+}
+
+void MoonFridgeModule::bumpEpoch()
+{
+    configEpoch++;
+    saveProbes();
+    // Report the new state at once rather than waiting for the next heartbeat. This is
+    // what makes a lost command reply harmless: the caller learns the change landed by
+    // seeing the state, not by catching the answer.
+    report(millis(), true);
+    sendConfigReport();
+}
+
 void MoonFridgeModule::report(uint32_t now, bool force)
 {
     if (!force && (int32_t)(now - nextReportAt) < 0) {
@@ -602,20 +682,34 @@ void MoonFridgeModule::report(uint32_t now, bool force)
             return;
     }
 
-    char line[224];
-    int len = snprintf(line, sizeof(line), "FRIDGE");
-    for (uint8_t i = 0; i < numProbes && len > 0 && (size_t)len < sizeof(line); i++) {
+    // Every heartbeat is a complete statement of state, not a delta: name, reading, and
+    // a suffix saying whether that probe is alarming (!) or has no reading (?). A
+    // listener that missed every previous packet is fully caught up by this one.
+    char body[768];
+    size_t len = 0;
+    for (uint8_t i = 0; i < numProbes && len < sizeof(body) - 1; i++) {
+        char value[24];
         if (probes[i].valid)
-            len += snprintf(line + len, sizeof(line) - len, "|%s=%.1f", probeName(i), probes[i].tempC);
+            snprintf(value, sizeof(value), "%.1f%s", probes[i].tempC, probes[i].alarmReported ? "!" : "");
         else
-            len += snprintf(line + len, sizeof(line) - len, "|%s=!", probeName(i)); // ! = absent or faulted
+            snprintf(value, sizeof(value), "?");
+        int w = snprintf(body + len, sizeof(body) - len, "%s%s=%s", len ? "\x1f" : "", probeName(i), value);
+        if (w <= 0)
+            break;
+        len += (size_t)w;
     }
-    sendLine(line);
+
+    char prefix[24];
+    snprintf(prefix, sizeof(prefix), "FRIDGE v%u", (unsigned)configEpoch);
+    sendSegmented(prefix, body);
     sendEnvironmentMetrics();
 
     for (uint8_t i = 0; i < MOONHUT_FRIDGE_MAX_PROBES; i++)
         reportedC[i] = (i < numProbes && probes[i].valid) ? probes[i].tempC : NAN;
     nextReportAt = now + REPORT_PERIOD_MS;
+
+    if ((int32_t)(now - nextCfgReportAt) >= 0)
+        sendConfigReport();
 }
 
 // --------------------------------------------------------------------------
@@ -651,6 +745,12 @@ void MoonFridgeModule::loadProbes()
     char *lineSave = nullptr;
     for (char *line = strtok_r(buf, "\n", &lineSave); line && numProbes < MOONHUT_FRIDGE_MAX_PROBES;
          line = strtok_r(nullptr, "\n", &lineSave)) {
+        // "v<n>" header line: the config epoch, so a reboot does not make a listener
+        // think the settings rolled back to the beginning.
+        if (line[0] == 'v' || line[0] == 'V') {
+            configEpoch = (uint32_t)strtoul(line + 1, nullptr, 10);
+            continue;
+        }
         if (strlen(line) < 17)
             continue;
 
@@ -712,6 +812,11 @@ void MoonFridgeModule::saveProbes()
 {
     char buf[1024];
     size_t len = 0;
+    {
+        int w = snprintf(buf, sizeof(buf), "v%u\n", (unsigned)configEpoch);
+        if (w > 0)
+            len = (size_t)w;
+    }
     for (uint8_t i = 0; i < numProbes; i++) {
         const uint8_t *a = probes[i].addr;
         int w = snprintf(buf + len, sizeof(buf) - len, "%02x%02x%02x%02x%02x%02x%02x%02x|%s|%.1f|%.1f|%u\n", a[0], a[1],
@@ -727,8 +832,7 @@ void MoonFridgeModule::saveProbes()
         LOG_ERROR("MoonFridge: could not write %s", PROBES_PATH);
         return;
     }
-    if (len)
-        f.write((const uint8_t *)buf, len);
+    f.write((const uint8_t *)buf, len);
     f.close();
 }
 
@@ -774,15 +878,15 @@ const char *MoonFridgeModule::handleCommand(const char *body)
     }
 
     if (strcasecmp(verb, "list") == 0) {
-        int len = snprintf(reply, sizeof(reply), "%u probe(s)", numProbes);
+        int len = snprintf(reply, sizeof(reply), "v%u %u probe(s)", (unsigned)configEpoch, numProbes);
         for (uint8_t i = 0; i < numProbes && len > 0 && (size_t)len < sizeof(reply); i++) {
             char t[16];
             if (probes[i].valid)
                 snprintf(t, sizeof(t), "%.1f", probes[i].tempC);
             else
                 snprintf(t, sizeof(t), "%s", probes[i].present ? "?" : "gone");
-            len += snprintf(reply + len, sizeof(reply) - len, " | %u=%s %s hi%.0f lo%.0f", i + 1, probeName(i), t,
-                            (double)probes[i].hiC, (double)probes[i].loC);
+            len += snprintf(reply + len, sizeof(reply) - len, " | %u=%s %s hi%.0f lo%.0f g%u", i + 1, probeName(i),
+                            t, (double)probes[i].hiC, (double)probes[i].loC, (unsigned)probes[i].glitches);
         }
         return reply;
     }
@@ -843,9 +947,9 @@ const char *MoonFridgeModule::handleCommand(const char *body)
         for (uint8_t i = idx; i + 1 < numProbes; i++)
             probes[i] = probes[i + 1];
         numProbes--;
-        saveProbes();
         shownCount = 0xFF;
         rebuildFrames();
+        bumpEpoch();
         snprintf(reply, sizeof(reply), "forgotten - %u probe(s) left", numProbes);
         return reply;
     } else {
@@ -862,8 +966,8 @@ const char *MoonFridgeModule::handleCommand(const char *body)
     }
 
     p.aboveSinceMs = 0; // a changed band must re-serve its dwell
-    saveProbes();
-    shownCount = 0xFF; // force a repaint with the new label/band
+    shownCount = 0xFF;  // force a repaint with the new label/band
+    bumpEpoch();
     snprintf(reply, sizeof(reply), "%u=%s hi%.1f lo%.1f dwell%us", idx + 1, probeName(idx), (double)p.hiC,
              (double)p.loC, (unsigned)p.dwellS);
     LOG_INFO("MoonFridge: %s", reply);
