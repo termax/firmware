@@ -1,0 +1,2 @@
+# PlatformIO writes this when it installs the symlinked package - build state, not source.
+.piopm
