@@ -79,11 +79,34 @@ static const char *LEGACY_NAMES_PATH = "/fridgenames";
 // used. Overridable at runtime with "fridge:dest=".
 static constexpr NodeNum DEFAULT_REPORT_DEST = 0x8fa66864;
 
-// Channel to report on. getByName() falls back to the primary channel when the named
-// one is absent, which is exactly the behaviour we want on an unprovisioned node.
+// Channel to report on.
 #ifndef MOONHUT_FRIDGE_CHANNEL
 #define MOONHUT_FRIDGE_CHANNEL "MoonFleet"
 #endif
+
+// Resolve it to a real index by POSITION, never by reading meshtastic_Channel::index.
+// That field is only preinitialised for channels the firmware sets up itself
+// (Channels.cpp: "ch.index = chIndex"); a channel added later over the CLI carries 0.
+// Trusting it sent every fridge report and every command reply out on channel 0 - the
+// default, unencrypted, public channel - instead of the fleet's private one.
+static bool findFridgeChannel(ChannelIndex &out)
+{
+    for (ChannelIndex i = 0; i < channels.getNumChannels(); i++) {
+        if (strcasecmp(channels.getGlobalId(i), MOONHUT_FRIDGE_CHANNEL) == 0) {
+            out = i;
+            return true;
+        }
+    }
+    out = channels.getPrimaryIndex(); // unprovisioned node: better than nothing
+    return false;
+}
+
+static ChannelIndex fridgeChannelIndex()
+{
+    ChannelIndex i = 0;
+    findFridgeChannel(i);
+    return i;
+}
 
 MoonFridgeModule::MoonFridgeModule()
     : concurrency::OSThread("MoonFridge"), wire(MOONHUT_ONEWIRE_PIN), sensors(&wire)
@@ -446,6 +469,30 @@ uint8_t MoonFridgeModule::buzzerPin()
     return pin;
 }
 
+// Commands change alarm thresholds, so accepting them from anywhere means anyone in RF
+// range of the default public channel could raise a limit and silently disable the alarm
+// on someone's freezer. The channel PSK is the shared secret that gates them - the same
+// model Meshtastic uses for admin messages.
+//
+// If the private channel is not configured there is nothing to gate against, and refusing
+// everything would strand a fresh node with no way to set it up, so that case stays open.
+bool MoonFridgeModule::acceptsCommand(ChannelIndex ch, bool pkiEncrypted) const
+{
+    // A PKI-encrypted DM is authenticated against this node's own key pair - a stronger
+    // claim than knowing a shared channel PSK, so it is always honoured. It has to be
+    // special-cased because Router.cpp stamps channel 0 on a packet when it encrypts it
+    // with Curve25519, so a PKI DM is indistinguishable from a primary-channel packet by
+    // index alone. Gating on the index alone would have locked out the very path the API
+    // is meant to use.
+    if (pkiEncrypted)
+        return true;
+
+    ChannelIndex want = 0;
+    if (!findFridgeChannel(want))
+        return true;
+    return ch == want;
+}
+
 void MoonFridgeModule::muteAlarm()
 {
     if (!alarm || alarmMuted)
@@ -494,7 +541,7 @@ void MoonFridgeModule::sendLine(const char *text)
         return;
     p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
     p->to = reportDest ? reportDest : DEFAULT_REPORT_DEST;
-    p->channel = channels.getByName(MOONHUT_FRIDGE_CHANNEL).index;
+    p->channel = fridgeChannelIndex();
     p->want_ack = false;
     p->decoded.payload.size = snprintf((char *)p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), "%s", text);
     service->sendToMesh(p, RX_SRC_LOCAL, false);
@@ -535,7 +582,7 @@ void MoonFridgeModule::sendEnvironmentMetrics()
         return;
     p->decoded.portnum = meshtastic_PortNum_TELEMETRY_APP;
     p->to = NODENUM_BROADCAST;
-    p->channel = channels.getByName(MOONHUT_FRIDGE_CHANNEL).index;
+    p->channel = fridgeChannelIndex();
     p->want_ack = false;
     p->decoded.payload.size =
         pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
@@ -803,6 +850,14 @@ const char *MoonFridgeModule::handleCommand(const char *body)
         return reply;
     } else {
         snprintf(reply, sizeof(reply), "unknown command '%s'", verb);
+        return reply;
+    }
+
+    // An inverted band would put the probe permanently outside it - a silent way to
+    // turn a monitor into a device that screams forever, or never.
+    if (p.hiC <= p.loC) {
+        snprintf(reply, sizeof(reply), "rejected: hi %.1f must be above lo %.1f", (double)p.hiC, (double)p.loC);
+        loadProbes();
         return reply;
     }
 

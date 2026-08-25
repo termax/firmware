@@ -6,6 +6,7 @@
 
 #include "concurrency/OSThread.h"
 #include "mesh/MeshTypes.h"
+#include "mesh/Channels.h"
 #include <Arduino.h>
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -108,6 +109,10 @@ class MoonFridgeModule : public concurrency::OSThread
 
     /// True while THIS probe is outside its band and has served its dwell.
     bool probeAlarming(uint8_t idx) const;
+
+    /// True if a "fridge:" command may be acted on. Commands change alarm thresholds, so
+    /// they need either a PKI-authenticated DM or the private channel's PSK.
+    bool acceptsCommand(ChannelIndex ch, bool pkiEncrypted) const;
 
     /// Handle a "fridge:" command body, e.g. "name 2=Freezer", "hi Freezer=-15",
     /// "list", "forget 2". Returns a short human-readable result for the reply.

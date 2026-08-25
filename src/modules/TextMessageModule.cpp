@@ -33,11 +33,22 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
         memcpy(body, mp.decoded.payload.bytes + 7, n);
         body[n] = 0;
 
+        if (!moonFridgeModule->acceptsCommand(mp.channel, mp.pki_encrypted)) {
+            LOG_WARN("MoonFridge: ignored a fridge: command arriving on channel %u - commands are only "
+                     "honoured on the private fridge channel",
+                     mp.channel);
+            return ProcessMessage::STOP;
+        }
+
         const char *result = moonFridgeModule->handleCommand(body);
         if (mp.from) {
             meshtastic_MeshPacket *reply = allocDataPacket();
             reply->to = mp.from;
             reply->channel = mp.channel;
+            // Ask for an ack so the router retries. A command reply is a one-shot answer
+            // to a question somebody asked - losing it silently leaves an API caller
+            // waiting forever, which is exactly what happened on the second live test.
+            reply->want_ack = true;
             reply->decoded.payload.size =
                 snprintf((char *)reply->decoded.payload.bytes, sizeof(reply->decoded.payload.bytes), "%s", result);
             service->sendToMesh(reply, RX_SRC_LOCAL, false);
