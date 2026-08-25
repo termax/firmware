@@ -183,8 +183,9 @@ template <uint8_t N> static void probeThunk(OLEDDisplay *d, OLEDDisplayUiState *
 }
 
 static const ProbeFrameCallback probeFrames[] = {
-    probeThunk<0>, probeThunk<1>, probeThunk<2>, probeThunk<3>, probeThunk<4>,
-    probeThunk<5>, probeThunk<6>, probeThunk<7>, probeThunk<8>, probeThunk<9>,
+    probeThunk<0>,  probeThunk<1>,  probeThunk<2>,  probeThunk<3>, probeThunk<4>,  probeThunk<5>,
+    probeThunk<6>,  probeThunk<7>,  probeThunk<8>,  probeThunk<9>, probeThunk<10>, probeThunk<11>,
+    probeThunk<12>, probeThunk<13>, probeThunk<14>, probeThunk<15>,
 };
 
 ProbeFrameCallback probeFrameFor(uint8_t idx)

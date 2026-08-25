@@ -141,6 +141,7 @@ class MoonFridgeModule : public concurrency::OSThread
         bool faultReported = false;
         bool alarmReported = false;
         uint8_t missedScans = 0;
+        uint8_t badReads = 0;      // consecutive rejected readings
         uint32_t lastGoodMs = 0;
         uint32_t aboveSinceMs = 0; // 0 = not currently outside its band
     };
@@ -161,6 +162,7 @@ class MoonFridgeModule : public concurrency::OSThread
     void maybeRefreshDisplay();
     static uint8_t buzzerPin();
     static bool plausible(float c);
+    static bool isSpike(const Probe &p, float c, uint32_t now);
 
     OneWire wire;
     DallasTemperature sensors;

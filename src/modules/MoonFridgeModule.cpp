@@ -41,6 +41,25 @@ static constexpr uint32_t RESCAN_PRESENT_MS = 30 * 1000UL;
 // scan is normal on a marginal joint and should not move anything on the panel.
 static constexpr uint8_t MISSED_SCANS_TO_DROP = 2;
 
+// Glitch rejection. A DS18B20 on a long or busy bus throws the occasional corrupted
+// read - a single flipped bit in a timing slot. Those must not reach the panel, the
+// alarm or the mesh, but they also must not be mistaken for a probe that has failed.
+//
+// So: retry once immediately, then hold the last good reading through a few more
+// failures before admitting there is no reading. Only a probe that stays silent is
+// actually reported as faulted.
+static constexpr uint8_t BAD_READS_TO_INVALIDATE = 3;
+static constexpr uint32_t HOLD_LAST_GOOD_MS = 60 * 1000UL;
+
+// A corrupted read is often a PLAUSIBLE number - -127 is easy to spot, but a flipped
+// bit can land at a perfectly reasonable-looking temperature. What gives it away is
+// that it is impossible: a sealed probe in a thermal mass cannot move this fast.
+// Generous enough never to reject a real change, tight enough to catch a bit-flip
+// that lands tens of degrees away.
+static constexpr float MAX_SLEW_C_PER_S = 2.0f;
+static constexpr float SPIKE_FLOOR_C = 2.0f;
+static constexpr uint32_t SPIKE_WINDOW_MS = 60 * 1000UL;
+
 // A present probe that has not produced a good reading for this long counts as faulted.
 static constexpr uint32_t FAULT_AFTER_MS = 5 * 60 * 1000UL;
 
@@ -89,6 +108,20 @@ bool MoonFridgeModule::plausible(float c)
     if (c == 85.0f)
         return false;
     return true;
+}
+
+// True if this reading is physically impossible given how recently we had a good one,
+// and therefore a bus glitch rather than a temperature. Never judges without a recent
+// reference: with no valid previous reading, any value has to be taken at face value.
+bool MoonFridgeModule::isSpike(const Probe &p, float c, uint32_t now)
+{
+    if (!p.valid || p.lastGoodMs == 0)
+        return false;
+    const uint32_t dtMs = now - p.lastGoodMs;
+    if (dtMs > SPIKE_WINDOW_MS)
+        return false; // too long since the reference to judge against it
+    const float maxJump = (MAX_SLEW_C_PER_S * (dtMs / 1000.0f)) + SPIKE_FLOOR_C;
+    return fabsf(c - p.tempC) > maxJump;
 }
 
 // --------------------------------------------------------------------------
@@ -173,10 +206,15 @@ void MoonFridgeModule::enumerate()
         }
     }
 
-    if (rosterGrew) {
+    if (rosterGrew)
         saveProbes();
-        rebuildFrames();
-    }
+
+    // Unconditional, not just when the roster grew. A probe restored from littlefs is
+    // not "new", so gating this on discovery meant a node that booted with a saved
+    // roster never built the per-probe frames - the button advanced once and then had
+    // nowhere left to go. rebuildFrames() is a no-op when the count already matches,
+    // and retries later if the screen does not exist yet.
+    rebuildFrames();
 
     if (numProbes != 0)
         return;
@@ -276,19 +314,40 @@ void MoonFridgeModule::readAll()
         }
 
         float c = sensors.getTempC(p.addr);
-        if (plausible(c)) {
+        if (!plausible(c)) {
+            // One immediate retry. A -127 on a marginal bus is usually a single
+            // corrupted slot, and the very next read comes back clean - which is far
+            // cheaper than waiting a whole sample period to find out.
+            c = sensors.getTempC(p.addr);
+        }
+
+        const bool usable = plausible(c) && !isSpike(p, c, now);
+        if (usable) {
             p.tempC = c;
             p.valid = true;
             p.warmingUp = false;
             p.lastGoodMs = now;
-        } else {
-            p.valid = false;
-            // A probe that has just joined has not finished its first conversion, so
-            // 85 C is expected exactly once and is not worth a warning.
-            if (p.warmingUp && c == 85.0f)
-                continue;
-            LOG_WARN("MoonFridge: %s bad read (%.1f C)", probeName(i), c);
+            p.badReads = 0;
+            continue;
         }
+
+        // A probe that has just joined has not finished its first conversion, so 85 C
+        // is expected exactly once and is not worth counting against it.
+        if (p.warmingUp && c == 85.0f)
+            continue;
+
+        p.badReads++;
+        if (p.valid && p.badReads < BAD_READS_TO_INVALIDATE && (now - p.lastGoodMs) < HOLD_LAST_GOOD_MS) {
+            // Ride it out on the last good value. This is the whole point: a glitch
+            // must not blank the panel or fire a fault for one bad slot.
+            LOG_DEBUG("MoonFridge: %s glitch %.1f C ignored (%u of %u)", probeName(i), c, p.badReads,
+                      BAD_READS_TO_INVALIDATE);
+            continue;
+        }
+
+        if (p.valid)
+            LOG_WARN("MoonFridge: %s no usable reading after %u tries (last %.1f C)", probeName(i), p.badReads, c);
+        p.valid = false;
     }
 }
 
@@ -766,8 +825,7 @@ void MoonFridgeModule::rebuildFrames()
     if (!screen || framesBuiltFor == numProbes)
         return;
     framesBuiltFor = numProbes;
-    // One overview frame plus one detail frame per probe. Only ever called when the
-    // roster actually changes, which the sticky roster makes rare.
+    // One overview frame plus one detail frame per probe.
     screen->setFrames(graphics::Screen::FOCUS_PRESERVE);
 #endif
 }
@@ -842,7 +900,8 @@ bool MoonFridgeModule::probeFault() const
 
 const char *MoonFridgeModule::probeLabel(uint8_t idx)
 {
-    static const char *labels[] = {"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"};
+    static const char *labels[] = {"P1", "P2",  "P3",  "P4",  "P5",  "P6",  "P7",  "P8",
+                                   "P9", "P10", "P11", "P12", "P13", "P14", "P15", "P16"};
     return idx < (sizeof(labels) / sizeof(labels[0])) ? labels[idx] : "P?";
 }
 
