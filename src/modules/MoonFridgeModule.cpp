@@ -718,24 +718,53 @@ void MoonFridgeModule::sendEnvironmentMetrics()
 // silently truncating configuration would be worse than sending nothing.
 void MoonFridgeModule::sendSegmented(const char *prefix, char *body)
 {
-    char packet[220];
-    size_t used = 0;
-    int wrote = snprintf(packet, sizeof(packet), "%s", prefix);
-    used = (wrote > 0) ? (size_t)wrote : 0;
+    // A LoRa text payload tops out around 230 bytes; sixteen probes' worth of names and
+    // bands does not fit, and silently truncating configuration would be worse than
+    // sending nothing.
+    //
+    // Segments carry "i/n" after the prefix. Without it a continuation is indistinguishable
+    // from a whole new report - same prefix, same epoch - and a parser would have to guess
+    // with a timing heuristic. A single-segment message omits the marker entirely, so the
+    // common case stays clean.
+    static constexpr size_t SEG_MAX = 200;
+
+    // Pass one: how many segments will this take?
+    uint8_t total = 1;
+    size_t used = strlen(prefix);
     const size_t headLen = used;
+    for (const char *f = body; *f;) {
+        const char *end = strchr(f, '\x1f');
+        const size_t flen = end ? (size_t)(end - f) : strlen(f);
+        if (used + flen + 1 >= SEG_MAX) {
+            total++;
+            used = headLen;
+        }
+        used += flen + 1;
+        f = end ? end + 1 : f + flen;
+    }
+
+    // Pass two: emit them.
+    char packet[240];
+    uint8_t index = 1;
+    int wrote = (total == 1) ? snprintf(packet, sizeof(packet), "%s", prefix)
+                             : snprintf(packet, sizeof(packet), "%s %u/%u", prefix, index, total);
+    used = (wrote > 0) ? (size_t)wrote : 0;
+    size_t segHead = used;
 
     for (char *field = strtok(body, "\x1f"); field; field = strtok(nullptr, "\x1f")) {
         const size_t need = strlen(field) + 1;
-        if (used + need >= sizeof(packet) - 1) {
+        if (used + need >= SEG_MAX && used > segHead) {
             sendLine(packet);
-            used = headLen;
-            packet[used] = 0;
+            index++;
+            wrote = snprintf(packet, sizeof(packet), "%s %u/%u", prefix, index, total);
+            used = (wrote > 0) ? (size_t)wrote : 0;
+            segHead = used;
         }
         int w = snprintf(packet + used, sizeof(packet) - used, "|%s", field);
         if (w > 0)
             used += (size_t)w;
     }
-    if (used > headLen)
+    if (used > segHead)
         sendLine(packet);
 }
 
