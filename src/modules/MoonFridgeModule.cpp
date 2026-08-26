@@ -120,12 +120,49 @@ static ChannelIndex fridgeChannelIndex()
 
 MoonFridgeModule::MoonFridgeModule()
     : concurrency::OSThread("MoonFridge"), wire(MOONHUT_ONEWIRE_PIN), sensors(&wire)
+#ifdef MOONHUT_ONEWIRE_PIN2
+      ,
+      wire2(MOONHUT_ONEWIRE_PIN2), sensors2(&wire2)
+#endif
 {
-    sensors.begin();
-    // Collect conversions on a later tick instead of blocking for 750 ms.
-    sensors.setWaitForConversion(false);
+    for (uint8_t b = 0; b < busCount(); b++) {
+        busFor(b).begin();
+        // Collect conversions on a later tick instead of blocking for 750 ms.
+        busFor(b).setWaitForConversion(false);
+    }
     loadProbes();
     enumerate();
+}
+
+uint8_t MoonFridgeModule::busCount()
+{
+#ifdef MOONHUT_ONEWIRE_PIN2
+    return 2;
+#else
+    return 1;
+#endif
+}
+
+uint8_t MoonFridgeModule::busPin(uint8_t bus)
+{
+#ifdef MOONHUT_ONEWIRE_PIN2
+    if (bus == 1)
+        return MOONHUT_ONEWIRE_PIN2;
+#else
+    (void)bus;
+#endif
+    return MOONHUT_ONEWIRE_PIN;
+}
+
+DallasTemperature &MoonFridgeModule::busFor(uint8_t bus)
+{
+#ifdef MOONHUT_ONEWIRE_PIN2
+    if (bus == 1)
+        return sensors2;
+#else
+    (void)bus;
+#endif
+    return sensors;
 }
 
 bool MoonFridgeModule::plausible(float c)
@@ -182,49 +219,59 @@ int8_t MoonFridgeModule::findRom(const DeviceAddress addr) const
     return -1;
 }
 
-void MoonFridgeModule::enumerate()
+void MoonFridgeModule::scanBus(uint8_t bus, bool *seen, bool &rosterGrew)
 {
-    sensors.begin(); // re-runs the bus search
+    DallasTemperature &dallas = busFor(bus);
+    dallas.begin(); // re-runs the search on this bus
 
-    bool seen[MOONHUT_FRIDGE_MAX_PROBES] = {};
-    bool rosterGrew = false;
-
-    uint8_t count = sensors.getDeviceCount();
+    uint8_t count = dallas.getDeviceCount();
     for (uint8_t i = 0; i < count; i++) {
         DeviceAddress addr;
-        if (!sensors.getAddress(addr, i))
+        if (!dallas.getAddress(addr, i))
             continue;
 
         int8_t slot = findRom(addr);
         if (slot < 0) {
             if (numProbes >= MOONHUT_FRIDGE_MAX_PROBES) {
-                LOG_WARN("MoonFridge: bus has more than %u probes - ignoring the extra", MOONHUT_FRIDGE_MAX_PROBES);
+                LOG_WARN("MoonFridge: more than %u probes across all buses - ignoring the extra",
+                         MOONHUT_FRIDGE_MAX_PROBES);
                 continue;
             }
             slot = (int8_t)numProbes++;
             probes[slot] = Probe();
             memcpy(probes[slot].addr, addr, sizeof(DeviceAddress));
+            probes[slot].bus = bus;
             rosterGrew = true;
 
             const uint8_t *a = probes[slot].addr;
-            LOG_INFO("MoonFridge: probe %s JOINED, slot %u, rom %02x%02x%02x%02x%02x%02x%02x%02x", probeName(slot),
-                     slot + 1, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+            LOG_INFO("MoonFridge: probe %s JOINED, slot %u, GPIO %u, rom %02x%02x%02x%02x%02x%02x%02x%02x",
+                     probeName(slot), slot + 1, busPin(bus), a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
         }
 
+        // A probe physically moved to the other bus keeps its slot, name and thresholds.
+        probes[slot].bus = bus;
         seen[slot] = true;
         probes[slot].missedScans = 0;
         if (!probes[slot].present) {
             probes[slot].present = true;
             probes[slot].warmingUp = true; // its first read will be the 85 C power-on value
-            if (!rosterGrew)
-                LOG_INFO("MoonFridge: probe %s is back on the bus", probeName(slot));
+            LOG_INFO("MoonFridge: probe %s is back, on GPIO %u", probeName(slot), busPin(bus));
         }
         if (!probes[slot].configured) {
             // 12-bit: 0.0625 C steps. Worth the 750 ms on a sensor read.
-            sensors.setResolution(probes[slot].addr, 12);
+            dallas.setResolution(probes[slot].addr, 12);
             probes[slot].configured = true;
         }
     }
+}
+
+void MoonFridgeModule::enumerate()
+{
+    bool seen[MOONHUT_FRIDGE_MAX_PROBES] = {};
+    bool rosterGrew = false;
+
+    for (uint8_t b = 0; b < busCount(); b++)
+        scanBus(b, seen, rosterGrew);
 
     for (uint8_t i = 0; i < numProbes; i++) {
         if (seen[i] || !probes[i].present)
@@ -252,7 +299,8 @@ void MoonFridgeModule::enumerate()
     if (numProbes != 0)
         return;
 
-    LOG_WARN("MoonFridge: no DS18B20 found on GPIO %d - check the 4.7k pullup and the data wire", MOONHUT_ONEWIRE_PIN);
+    for (uint8_t b = 0; b < busCount(); b++)
+        LOG_WARN("MoonFridge: no DS18B20 found on GPIO %u - check the pullup and the data wire", busPin(b));
 
     // Raw presence-pulse test on the configured pin. This separates "nothing is
     // electrically alive on the bus" from "a device answers but its ROM will not
@@ -346,12 +394,13 @@ void MoonFridgeModule::readAll()
             continue;
         }
 
-        float c = sensors.getTempC(p.addr);
+        DallasTemperature &dallas = busFor(p.bus);
+        float c = dallas.getTempC(p.addr);
         if (!plausible(c)) {
             // One immediate retry. A -127 on a marginal bus is usually a single
             // corrupted slot, and the very next read comes back clean - which is far
             // cheaper than waiting a whole sample period to find out.
-            c = sensors.getTempC(p.addr);
+            c = dallas.getTempC(p.addr);
         }
 
         const bool usable = plausible(c) && !isSpike(p, c, now);
@@ -484,6 +533,23 @@ uint8_t MoonFridgeModule::buzzerPin()
     if (!pin)
         pin = PIN_BUZZER;
 #endif
+
+    // Never drive a pin that carries a probe bus. tone() on a 1-Wire line corrupts every
+    // read on it for as long as the alarm sounds - and an alarm is exactly when you most
+    // need the readings. This has already happened once: the default buzzer pin was 48,
+    // which is also the obvious choice for a second bus.
+    for (uint8_t b = 0; b < busCount(); b++) {
+        if (pin && pin == busPin(b)) {
+            static bool moaned = false;
+            if (!moaned) {
+                moaned = true;
+                LOG_ERROR("MoonFridge: buzzer GPIO %u is the bus %u data pin - refusing to drive it. "
+                          "Move the buzzer (device.buzzer_gpio) to a free pin.",
+                          pin, b);
+            }
+            return 0;
+        }
+    }
     return pin;
 }
 
@@ -1094,7 +1160,8 @@ int32_t MoonFridgeModule::runOnce()
     switch (phase) {
     case Phase::Convert:
         if ((int32_t)(now - nextSampleAt) >= 0) {
-            sensors.requestTemperatures(); // non-blocking: setWaitForConversion(false)
+            for (uint8_t b = 0; b < busCount(); b++)
+                busFor(b).requestTemperatures(); // non-blocking: setWaitForConversion(false)
             readReadyAt = now + CONVERSION_MS;
             phase = Phase::Read;
         }

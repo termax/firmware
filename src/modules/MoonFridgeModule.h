@@ -26,6 +26,12 @@
 #define MOONHUT_ONEWIRE_PIN 47
 #endif
 
+// Optional SECOND 1-Wire bus. Splitting a room-sized install across two shorter buses
+// beats one long one: 1-Wire degrades with total bus length and with stub legs, so two
+// buses of four probes are far more reliable than one of eight.
+// Undefine to go back to a single bus.
+// Defined per-env in platformio.ini; leave undefined for a single-bus board.
+
 #ifndef MOONHUT_FRIDGE_MAX_PROBES
 #define MOONHUT_FRIDGE_MAX_PROBES 4
 #endif
@@ -145,6 +151,7 @@ class MoonFridgeModule : public concurrency::OSThread
         bool warmingUp = false;    // joined but has not completed its first conversion
         bool faultReported = false;
         bool alarmReported = false;
+        uint8_t bus = 0;           // which 1-Wire bus this probe answers on
         uint8_t missedScans = 0;
         uint8_t badReads = 0;      // consecutive rejected readings
         uint32_t glitches = 0;     // lifetime rejected readings - a degrading joint shows
@@ -155,6 +162,7 @@ class MoonFridgeModule : public concurrency::OSThread
     };
 
     void enumerate();
+    void scanBus(uint8_t bus, bool *seen, bool &rosterGrew);
     void loadProbes();
     void saveProbes();
     int8_t findRom(const DeviceAddress addr) const;
@@ -177,6 +185,15 @@ class MoonFridgeModule : public concurrency::OSThread
 
     OneWire wire;
     DallasTemperature sensors;
+#ifdef MOONHUT_ONEWIRE_PIN2
+    OneWire wire2;
+    DallasTemperature sensors2;
+#endif
+
+    /// The Dallas driver for a bus index, and how many buses are fitted.
+    DallasTemperature &busFor(uint8_t bus);
+    static uint8_t busCount();
+    static uint8_t busPin(uint8_t bus);
 
     Probe probes[MOONHUT_FRIDGE_MAX_PROBES];
     uint8_t numProbes = 0;
