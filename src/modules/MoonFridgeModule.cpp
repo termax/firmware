@@ -85,9 +85,9 @@ static constexpr uint32_t BEEP_LEN_MS = 250;
 static const char *PROBES_PATH = "/fridgeprobes";
 static const char *LEGACY_NAMES_PATH = "/fridgenames";
 
-// Default report destination: the fleet gateway, the same constant the sign ack path
-// used. Overridable at runtime with "fridge:dest=".
-static constexpr NodeNum DEFAULT_REPORT_DEST = 0x8fa66864;
+// Reports BROADCAST by default (see sendLine for the measurement behind that). Setting
+// "fridge:dest=!<hex>" overrides it with a directed DM to that node.
+static constexpr NodeNum DEFAULT_REPORT_DEST = 0x8fa66864; // the fleet gateway, for reference
 
 // Channel to report on.
 #ifndef MOONHUT_FRIDGE_CHANNEL
@@ -664,7 +664,21 @@ void MoonFridgeModule::sendLine(const char *text)
     if (!p)
         return;
     p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
-    p->to = reportDest ? reportDest : DEFAULT_REPORT_DEST;
+    // BROADCAST, not a DM to the gateway. Measured on this link over 40 packets: 27
+    // broadcasts arrived and the DMs were patchy - it explains every gap we chased,
+    // the two lost command replies, the config-only stretch and the missing heartbeats.
+    //
+    // A DM needs a route ("Setting next hop for dest ... to 0"); a broadcast floods and
+    // any relay carries it, so on a marginal link the flood wins. The tank node, which
+    // broadcasts, has not missed a report from a worse antenna position.
+    //
+    // The cost is real and accepted: channel-PSK encryption instead of end-to-end PKI,
+    // and a little more airtime. For a device whose whole job is to say when a fridge
+    // has failed, arriving beats arriving privately - and MOONHUT_FRIDGE_CHANNEL is the
+    // fleet's private channel, not the public one.
+    //
+    // "fridge:dest=" still forces a DM for anyone who wants one.
+    p->to = reportDest ? reportDest : NODENUM_BROADCAST;
     p->channel = fridgeChannelIndex();
     p->want_ack = false;
     p->decoded.payload.size = snprintf((char *)p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), "%s", text);
