@@ -218,6 +218,13 @@ class MoonFridgeModule : public concurrency::OSThread
     uint8_t framesBuiltFor = 0xFF; // roster size the frameset was last built for
     uint32_t nextReportAt = 0;
     uint32_t nextCfgReportAt = 0;
+    // Which probes are currently latched / faulted, as bit masks. Messaging is driven off
+    // these rather than per probe: one packet describing the whole node beats one packet
+    // per probe, which at sixteen probes would be a sixteen-packet burst every repeat.
+    uint32_t alarmMask = 0;
+    uint32_t faultMask = 0;
+    uint32_t alarmMsgAt = 0;
+    uint32_t faultMsgAt = 0;
     // Bumped on every configuration change and carried in every heartbeat, so a listener
     // can tell at a glance whether the settings it believes in are the ones in force -
     // without needing to have caught the reply that changed them.

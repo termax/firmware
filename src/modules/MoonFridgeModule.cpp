@@ -436,80 +436,120 @@ void MoonFridgeModule::readAll()
 
 void MoonFridgeModule::evaluate(uint32_t now)
 {
-    bool anyLatched = false;
+    uint32_t latched = 0;
+    uint32_t faulted = 0;
 
     for (uint8_t i = 0; i < numProbes; i++) {
         Probe &p = probes[i];
+
         if (!p.valid) {
-            // A failed read is not evidence of warmth - hold the timer rather
-            // than either arming or clearing on missing data.
+            // A failed read is not evidence of warmth - hold the timer rather than either
+            // arming or clearing on missing data.
             if (p.aboveSinceMs != 0 && (now - p.aboveSinceMs) >= (p.dwellS * 1000UL))
-                anyLatched = true;
-            continue;
-        }
+                latched |= (1UL << i);
+        } else {
+            const bool tooWarm = p.tempC > p.hiC;
+            const bool tooCold = p.tempC < p.loC;
+            // Hysteresis applies inward from whichever limit was crossed.
+            const bool backInBand = (p.tempC < (p.hiC - MOONHUT_FRIDGE_HYSTERESIS_C)) &&
+                                    (p.tempC > (p.loC + MOONHUT_FRIDGE_HYSTERESIS_C));
 
-        const bool tooWarm = p.tempC > p.hiC;
-        const bool tooCold = p.tempC < p.loC;
-        // Hysteresis applies inward from whichever limit was crossed.
-        const bool backInBand = (p.tempC < (p.hiC - MOONHUT_FRIDGE_HYSTERESIS_C)) &&
-                                (p.tempC > (p.loC + MOONHUT_FRIDGE_HYSTERESIS_C));
-
-        if (tooWarm || tooCold) {
-            if (p.aboveSinceMs == 0) {
-                p.aboveSinceMs = now;
-                LOG_INFO("MoonFridge: %s %s (%.1f, band %.1f..%.1f) - dwell started", probeName(i),
-                         tooWarm ? "too warm" : "too cold", p.tempC, (double)p.loC, (double)p.hiC);
-            }
-            if ((now - p.aboveSinceMs) >= (p.dwellS * 1000UL)) {
-                anyLatched = true;
-                const bool isNew = !p.alarmReported;
-                // Re-announce while it stays latched. Announcing once and trusting the
-                // radio is exactly how a warm fridge goes unnoticed overnight - we have
-                // already watched single packets vanish on this link.
-                if (isNew || (now - p.alarmSentMs) >= ALARM_REPEAT_MS) {
-                    if (isNew) {
-                        p.alarmReported = true;
-                        alarmMuted = false; // a NEW probe alarming always re-arms the buzzer
-                    }
-                    p.alarmSentMs = now;
-                    char msg[96];
-                    snprintf(msg, sizeof(msg), "FRIDGE ALARM|%s|%.1f|%s=%.1f%s", probeName(i), p.tempC,
-                             tooWarm ? "hi" : "lo", (double)(tooWarm ? p.hiC : p.loC), isNew ? "" : "|repeat");
-                    sendLine(msg);
+            if (tooWarm || tooCold) {
+                if (p.aboveSinceMs == 0) {
+                    p.aboveSinceMs = now;
+                    LOG_INFO("MoonFridge: %s %s (%.1f, band %.1f..%.1f) - dwell started", probeName(i),
+                             tooWarm ? "too warm" : "too cold", p.tempC, (double)p.loC, (double)p.hiC);
                 }
+                if ((now - p.aboveSinceMs) >= (p.dwellS * 1000UL))
+                    latched |= (1UL << i);
+            } else if (backInBand) {
+                if (p.aboveSinceMs != 0)
+                    LOG_INFO("MoonFridge: %s back in band (%.1f) - cleared", probeName(i), p.tempC);
+                p.aboveSinceMs = 0;
             }
-        } else if (backInBand) {
-            if (p.aboveSinceMs != 0)
-                LOG_INFO("MoonFridge: %s back in band (%.1f) - cleared", probeName(i), p.tempC);
-            p.aboveSinceMs = 0;
-            if (p.alarmReported) {
-                p.alarmReported = false;
-                char msg[96];
-                snprintf(msg, sizeof(msg), "FRIDGE CLEAR|%s|%.1f", probeName(i), p.tempC);
-                sendLine(msg);
-            }
+            // Between the limits and their hysteresis margins: hold the current state.
         }
-        // Between the limits and their hysteresis margins: hold the current state.
+
+        // A silent probe is a different problem from a warm one, and the operator needs to
+        // know which - so faults are tracked and announced separately from alarms.
+        if (!p.present || (p.lastGoodMs != 0 && (now - p.lastGoodMs) > FAULT_AFTER_MS))
+            faulted |= (1UL << i);
     }
 
-    // Fault reporting is per probe and separate from the alarm: a silent probe is a
-    // different problem from a warm one, and the operator needs to know WHICH.
+    // Per-probe flags for the panel.
     for (uint8_t i = 0; i < numProbes; i++) {
-        Probe &p = probes[i];
-        const bool faulted = !p.present || (p.lastGoodMs != 0 && (now - p.lastGoodMs) > FAULT_AFTER_MS);
-        if (faulted && !p.faultReported) {
-            p.faultReported = true;
-            char msg[64];
-            snprintf(msg, sizeof(msg), "FRIDGE FAULT|%s", probeName(i));
-            sendLine(msg);
-        } else if (!faulted && p.faultReported && p.valid) {
-            p.faultReported = false;
-            char msg[64];
-            snprintf(msg, sizeof(msg), "FRIDGE OK|%s", probeName(i));
-            sendLine(msg);
-        }
+        probes[i].alarmReported = (latched & (1UL << i)) != 0;
+        probes[i].faultReported = (faulted & (1UL << i)) != 0;
     }
 
+    // --- one message for the whole node, not one per probe ---------------------
+    //
+    // Six probes alarming used to mean six packets inside eight seconds, repeating every
+    // five minutes; sixteen would mean sixteen. That crowds the node's own heartbeats off
+    // the air - we watched exactly that happen - and it turns one event into six Telegram
+    // notifications. One packet listing every affected probe is both better radio manners
+    // and a better alert.
+    const bool alarmSetChanged = (latched != alarmMask);
+    const bool alarmRepeatDue = latched && (now - alarmMsgAt) >= ALARM_REPEAT_MS;
+    if (alarmSetChanged || alarmRepeatDue) {
+        char body[400];
+        size_t len = 0;
+        for (uint8_t i = 0; i < numProbes && len < sizeof(body) - 1; i++) {
+            if (!(latched & (1UL << i)))
+                continue;
+            // "name=temp>limit" for too warm, "name=temp<limit" for too cold - so the
+            // message says which way it broke without needing the config to interpret it.
+            const bool warm = !probes[i].valid || probes[i].tempC > probes[i].hiC;
+            int w = snprintf(body + len, sizeof(body) - len, "%s%s=%.1f%c%.1f", len ? "\x1f" : "", probeName(i),
+                             probes[i].tempC, warm ? '>' : '<', (double)(warm ? probes[i].hiC : probes[i].loC));
+            if (w <= 0)
+                break;
+            len += (size_t)w;
+        }
+
+        char prefix[32];
+        if (latched) {
+            snprintf(prefix, sizeof(prefix), "FRIDGE ALARM v%u%s", (unsigned)configEpoch, alarmSetChanged ? "" : " rpt");
+            sendSegmented(prefix, body);
+            if (alarmSetChanged)
+                alarmMuted = false; // any NEW probe alarming re-arms the buzzer
+        } else if (alarmMask) {
+            snprintf(prefix, sizeof(prefix), "FRIDGE CLEAR v%u", (unsigned)configEpoch);
+            sendLine(prefix);
+        }
+        alarmMask = latched;
+        alarmMsgAt = now;
+    }
+
+    // Faults are coalesced the same way, and for the same reason: a whole bus dropping out
+    // is precisely when a per-probe storm would be worst.
+    const bool faultSetChanged = (faulted != faultMask);
+    const bool faultRepeatDue = faulted && (now - faultMsgAt) >= ALARM_REPEAT_MS;
+    if (faultSetChanged || faultRepeatDue) {
+        char body[400];
+        size_t len = 0;
+        for (uint8_t i = 0; i < numProbes && len < sizeof(body) - 1; i++) {
+            if (!(faulted & (1UL << i)))
+                continue;
+            int w = snprintf(body + len, sizeof(body) - len, "%s%s", len ? "\x1f" : "", probeName(i));
+            if (w <= 0)
+                break;
+            len += (size_t)w;
+        }
+
+        char prefix[32];
+        if (faulted) {
+            snprintf(prefix, sizeof(prefix), "FRIDGE FAULT v%u%s", (unsigned)configEpoch, faultSetChanged ? "" : " rpt");
+            sendSegmented(prefix, body);
+        } else if (faultMask) {
+            snprintf(prefix, sizeof(prefix), "FRIDGE OK v%u", (unsigned)configEpoch);
+            sendLine(prefix);
+        }
+        faultMask = faulted;
+        faultMsgAt = now;
+    }
+
+    const bool anyLatched = latched != 0;
     if (anyLatched != alarm) {
         alarm = anyLatched;
         LOG_WARN("MoonFridge: ALARM %s", alarm ? "ON" : "OFF");
