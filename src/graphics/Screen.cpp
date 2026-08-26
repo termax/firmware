@@ -36,6 +36,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "draw/DebugRenderer.h"
 #include "draw/MenuHandler.h"
 #include "draw/FridgeRenderer.h"
+#include "draw/TankRenderer.h"
 #ifdef MOONHUT_FRIDGE
 #include "modules/MoonFridgeModule.h"
 #endif
@@ -1145,6 +1146,26 @@ void Screen::setFrames(FrameFocus focus)
     showingNormalScreen = true;
 
     indicatorIcons.clear();
+
+#ifdef MOONHUT_TANK_ONLY
+    // Proof-of-concept appliance: the ranger frame and nothing else, for the same
+    // reason the fridge build strips the carousel - there is nowhere to get lost.
+    {
+        uint8_t nf = 0;
+        normalFrames[nf++] = graphics::TankRenderer::drawTankFrame;
+        fsi.frameCount = nf;
+        this->frameCount = nf;
+        ui->setFrames(normalFrames, nf);
+        ui->disableAllIndicators();
+        static OverlayCallback tankOverlays[] = {NotificationRenderer::drawBannercallback};
+        ui->setOverlays(tankOverlays, sizeof(tankOverlays) / sizeof(tankOverlays[0]));
+        prevFrame = -1;
+        ui->switchToFrame(0);
+        this->framesetInfo = fsi;
+        setFastFramerate();
+        return;
+    }
+#endif
 
 #ifdef MOONHUT_FRIDGE_ONLY
     // A dedicated appliance, not a Meshtastic node with a probe bolted on. The frameset

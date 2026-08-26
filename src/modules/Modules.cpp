@@ -92,6 +92,9 @@
 #ifdef MOONHUT_FRIDGE
 #include "modules/MoonFridgeModule.h"
 #endif
+#ifdef MOONHUT_TANK
+#include "modules/MoonTankModule.h"
+#endif
 #endif
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
 #include "modules/RangeTestModule.h"
@@ -250,6 +253,10 @@ void setupModules()
 #endif
 #if !MESHTASTIC_EXCLUDE_EXTERNALNOTIFICATION
     externalNotificationModule = new ExternalNotificationModule();
+#endif
+#ifdef MOONHUT_TANK
+    // MoonHut: HC-SR04 ultrasonic tank level (proof of concept).
+    moonTankModule = new MoonTankModule();
 #endif
 #ifdef MOONHUT_FRIDGE
     // MoonHut: DS18B20 probes + local over-temperature alarm. Constructed after
