@@ -93,6 +93,9 @@ static constexpr uint32_t CFG_REPORT_PERIOD_MS = 30 * 60 * 1000UL;
 // watched single packets go missing on this link.
 static constexpr uint32_t ALARM_REPEAT_MS = 5 * 60 * 1000UL;
 
+// Long enough to swallow an operator (or an API) configuring probe after probe, short
+// enough that a single edit still feels immediate.
+static constexpr uint32_t EPOCH_REPORT_DEBOUNCE_MS = 4000;
 static constexpr uint32_t BEEP_PERIOD_MS = 3000;
 static constexpr uint16_t BEEP_FREQ_HZ = 2400;
 static constexpr uint32_t BEEP_LEN_MS = 250;
@@ -699,6 +702,12 @@ void MoonFridgeModule::muteAlarm()
 // nothing at all. Responsiveness was never worth that failure mode.
 void MoonFridgeModule::serviceButton(uint32_t now)
 {
+    if (epochReportAt && (int32_t)(now - epochReportAt) >= 0) {
+        epochReportAt = 0;
+        report(now, true);
+        sendConfigReport();
+    }
+
     if (testBeepAt && (int32_t)(now - testBeepAt) >= 0) {
         testBeepAt = 0;
         uint8_t pin = buzzerPin();
@@ -980,11 +989,18 @@ void MoonFridgeModule::bumpEpoch()
 {
     configEpoch++;
     saveProbes();
-    // Report the new state at once rather than waiting for the next heartbeat. This is
-    // what makes a lost command reply harmless: the caller learns the change landed by
-    // seeing the state, not by catching the answer.
-    report(millis(), true);
-    sendConfigReport();
+    // Report the new state rather than waiting for the next heartbeat: that is what makes
+    // a lost command reply harmless, because the caller learns the change landed by seeing
+    // the state, not by catching the answer.
+    //
+    // But COALESCED, not immediate. Configuring a node means a burst of commands - naming
+    // and setting a band for every probe - and reporting inside each one turns a 9-probe
+    // setup into ~18 broadcasts in half a minute, on a mesh already measured near 30%
+    // channel utilisation. Every command still lands and still gets its own reply; only
+    // the state report waits for the burst to finish.
+    epochReportAt = millis() + EPOCH_REPORT_DEBOUNCE_MS;
+    if (!epochReportAt)
+        epochReportAt = 1;
 }
 
 void MoonFridgeModule::report(uint32_t now, bool force)
@@ -1251,7 +1267,13 @@ const char *MoonFridgeModule::handleCommand(const char *body)
                 v++;
             reportDest = (NodeNum)strtoul(v, nullptr, 16);
         }
-        snprintf(reply, sizeof(reply), "reports go to !%08x", (unsigned)(reportDest ? reportDest : DEFAULT_REPORT_DEST));
+        // Say what sendLine() ACTUALLY does. With no dest set it broadcasts; claiming it
+        // goes to DEFAULT_REPORT_DEST was a plain lie to anyone reading the config back.
+        if (reportDest)
+            snprintf(reply, sizeof(reply), "reports go to !%08x", (unsigned)reportDest);
+        else
+            snprintf(reply, sizeof(reply), "reports BROADCAST (no dest set; !%08x is only the default suggestion)",
+                     (unsigned)DEFAULT_REPORT_DEST);
         return reply;
     }
 

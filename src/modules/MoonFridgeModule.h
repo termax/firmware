@@ -234,6 +234,7 @@ class MoonFridgeModule : public concurrency::OSThread
     bool btnDown = false;
     bool btnLongSent = false;
     uint32_t testBeepAt = 0;       // when the second pulse of a test beep is due
+    uint32_t epochReportAt = 0;    // coalesced state+config report after a burst of edits
     uint32_t btnChangedAt = 0;
     bool ledsInit = false;
     bool ledBlinkOn = false;
