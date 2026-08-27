@@ -650,6 +650,21 @@ bool MoonFridgeModule::acceptsCommand(ChannelIndex ch, bool pkiEncrypted) const
     return ch == want;
 }
 
+// A deliberate double-beep, so it cannot be mistaken for the alarm's single 250 ms
+// pulse. Confirms the piezo, its wiring and device.buzzer_gpio in one gesture.
+void MoonFridgeModule::testBeep()
+{
+    uint8_t pin = buzzerPin();
+    if (!pin) {
+        LOG_WARN("MoonFridge: buzzer test requested but no usable buzzer pin (device.buzzer_gpio=%u)",
+                 (unsigned)config.device.buzzer_gpio);
+        return;
+    }
+    LOG_INFO("MoonFridge: buzzer test on GPIO %u", pin);
+    tone(pin, BEEP_FREQ_HZ, 120);
+    testBeepAt = millis() + 260;   // second pulse, fired from runOnce
+}
+
 void MoonFridgeModule::muteAlarm()
 {
     if (!alarm || alarmMuted)
@@ -673,6 +688,13 @@ void MoonFridgeModule::muteAlarm()
 // nothing at all. Responsiveness was never worth that failure mode.
 void MoonFridgeModule::serviceButton(uint32_t now)
 {
+    if (testBeepAt && (int32_t)(now - testBeepAt) >= 0) {
+        testBeepAt = 0;
+        uint8_t pin = buzzerPin();
+        if (pin)
+            tone(pin, BEEP_FREQ_HZ, 120);
+    }
+
 #ifdef MOONHUT_EXT_BUTTON_PIN
     if (!btnInit) {
         btnInit = true;
@@ -703,8 +725,17 @@ void MoonFridgeModule::serviceButton(uint32_t now)
     // Held past the long-press threshold: silence the buzzer, once per press.
     if (btnDown && !btnLongSent && (now - btnChangedAt) >= 500) {
         btnLongSent = true;
-        LOG_INFO("MoonFridge: button held - muting");
-        muteAlarm();
+        // Hold = silence a sounding alarm, or - when nothing is sounding - prove the
+        // buzzer works. Otherwise the only way to hear it is to provoke a real alarm,
+        // which needs a probe reading out of band; a node that is boxed up with its
+        // probes not yet fitted has no way to test its own alarm at all. Same gesture,
+        // and it can never mask a real alarm because muting always wins when one exists.
+        if (alarm && !alarmMuted) {
+            LOG_INFO("MoonFridge: button held - muting");
+            muteAlarm();
+        } else {
+            testBeep();
+        }
     }
 #else
     (void)now;

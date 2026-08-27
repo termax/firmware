@@ -191,6 +191,7 @@ class MoonFridgeModule : public concurrency::OSThread
     void serviceBuzzer(uint32_t now);
     void serviceLeds(uint32_t now);
     void serviceButton(uint32_t now);
+    void testBeep();
     void maybeRefreshDisplay();
     static uint8_t buzzerPin();
     static bool plausible(float c);
@@ -232,6 +233,7 @@ class MoonFridgeModule : public concurrency::OSThread
     bool btnInit = false;
     bool btnDown = false;
     bool btnLongSent = false;
+    uint32_t testBeepAt = 0;       // when the second pulse of a test beep is due
     uint32_t btnChangedAt = 0;
     bool ledsInit = false;
     bool ledBlinkOn = false;
