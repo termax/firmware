@@ -37,6 +37,27 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             LOG_WARN("MoonFridge: ignored a fridge: command arriving on channel %u - commands are only "
                      "honoured on the private fridge channel",
                      mp.channel);
+            // SAY SO, rather than dropping it into a hole. A silent refusal is
+            // indistinguishable from a lost packet at the far end, and the transport ACK
+            // still fires - the router acks before this module ever sees the payload - so
+            // the caller is told the command was DELIVERED and then never sees an effect.
+            //
+            // That cost hours on 2026-08-27: meshhub sends these without a channelIndex,
+            // relying on PKI to satisfy the gate, and every command that went out without
+            // it vanished here. Eight sent, three applied, no errors anywhere.
+            //
+            // The reply goes back on the channel it arrived on, so it reaches whoever
+            // asked. It deliberately says nothing about which channel IS required.
+            if (mp.from) {
+                meshtastic_MeshPacket *nack = allocDataPacket();
+                nack->to = mp.from;
+                nack->channel = mp.channel;
+                nack->want_ack = false; // best effort; never retry a refusal
+                nack->decoded.payload.size =
+                    snprintf((char *)nack->decoded.payload.bytes, sizeof(nack->decoded.payload.bytes),
+                             "command ignored: wrong channel (use the private fridge channel, or a PKI DM)");
+                service->sendToMesh(nack, RX_SRC_LOCAL, false);
+            }
             return ProcessMessage::STOP;
         }
 
