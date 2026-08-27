@@ -136,7 +136,13 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             // Pass message to renderer (banner + thread switching + scroll reset)
             // Use the global Screen singleton to retrieve the current OLED display
             auto *display = screen ? screen->getDisplayDevice() : nullptr;
+#ifdef MOONHUT_FRIDGE_ONLY
+            // A dedicated monitor must never let a message disturb the readings. This is
+            // what raises the banner that was overlaying the probe temperatures.
+            (void)display;
+#else
             graphics::MessageRenderer::handleNewMessage(display, sm, mp);
+#endif
 #else
             (void)sm;
 #endif

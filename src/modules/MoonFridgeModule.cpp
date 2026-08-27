@@ -130,8 +130,14 @@ MoonFridgeModule::MoonFridgeModule()
         // Collect conversions on a later tick instead of blocking for 750 ms.
         busFor(b).setWaitForConversion(false);
     }
-    loadProbes();
-    enumerate();
+    // NOT loadProbes()/enumerate() here. Modules are constructed before littlefs is
+    // reliably mounted, and a load that silently fails is catastrophic: enumerate()
+    // then sees every probe as new, sets rosterGrew, and saveProbes() OVERWRITES the
+    // stored roster - destroying every name and threshold on the node.
+    //
+    // That is not hypothetical; it ate the name "Bench2" and had to be diagnosed from
+    // the gateway's message history. The first runOnce() happens well after init, so
+    // the roster is loaded there instead.
 }
 
 uint8_t MoonFridgeModule::busCount()
@@ -869,7 +875,6 @@ void MoonFridgeModule::loadProbes()
 {
     if (probesLoaded)
         return;
-    probesLoaded = true;
 
     char buf[1024] = {};
     size_t n = 0;
@@ -878,13 +883,27 @@ void MoonFridgeModule::loadProbes()
     if (f) {
         n = f.read((uint8_t *)buf, sizeof(buf) - 1);
         f.close();
+        probesLoaded = true;
     } else {
         // v1 migration: "<rom>=<name>" with no thresholds.
         auto old = FSCom.open(LEGACY_NAMES_PATH, FILE_O_READ);
-        if (!old)
+        if (!old) {
+            // Neither file opened. On a genuinely fresh node that is correct and saving
+            // is safe; if the filesystem simply is not up yet it is NOT, and we cannot
+            // tell the two apart from here. Assume mounted-and-empty only once the FS
+            // has proven itself by listing its root.
+            auto root = FSCom.open("/");
+            if (root) {
+                root.close();
+                probesLoaded = true; // filesystem is alive, the file really is absent
+            } else {
+                LOG_WARN("MoonFridge: filesystem not ready - will retry the roster load");
+            }
             return;
+        }
         n = old.read((uint8_t *)buf, sizeof(buf) - 1);
         old.close();
+        probesLoaded = true;
         LOG_INFO("MoonFridge: migrating %s to %s", LEGACY_NAMES_PATH, PROBES_PATH);
     }
     if (n == 0)
@@ -959,6 +978,15 @@ void MoonFridgeModule::loadProbes()
 
 void MoonFridgeModule::saveProbes()
 {
+    // Belt and braces for the failure above: never write over a roster we did not
+    // manage to read. Losing the names silently is far worse than not persisting a
+    // change - the change can be redone, the names cannot be recovered.
+    if (!probesLoaded) {
+        LOG_ERROR("MoonFridge: refusing to save - the roster was never loaded, and "
+                  "overwriting it would destroy the stored names and thresholds");
+        return;
+    }
+
     char buf[1024];
     size_t len = 0;
     {
@@ -1223,6 +1251,12 @@ const char *MoonFridgeModule::probeName(uint8_t idx) const
 int32_t MoonFridgeModule::runOnce()
 {
     uint32_t now = millis();
+
+    if (!started) {
+        started = true;
+        loadProbes();
+        enumerate();
+    }
 
     if (numProbes == 0) {
         if ((int32_t)(now - nextEnumerateAt) >= 0) {

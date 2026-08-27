@@ -1157,8 +1157,11 @@ void Screen::setFrames(FrameFocus focus)
         this->frameCount = nf;
         ui->setFrames(normalFrames, nf);
         ui->disableAllIndicators();
-        static OverlayCallback tankOverlays[] = {NotificationRenderer::drawBannercallback};
-        ui->setOverlays(tankOverlays, sizeof(tankOverlays) / sizeof(tankOverlays[0]));
+        // NO overlays. The banner callback draws incoming-message popups straight over
+        // the readings - on a monitor whose entire job is to show a number, an overlay
+        // that hides that number is worse than the message being missed. There is no
+        // message UI on this build anyway, so nothing is lost by never drawing one.
+        ui->setOverlays(nullptr, 0);
         prevFrame = -1;
         ui->switchToFrame(0);
         this->framesetInfo = fsi;
@@ -1194,8 +1197,11 @@ void Screen::setFrames(FrameFocus focus)
         ui->setFrames(normalFrames, nf);
         ui->disableAllIndicators();
 
-        static OverlayCallback fridgeOverlays[] = {NotificationRenderer::drawBannercallback};
-        ui->setOverlays(fridgeOverlays, sizeof(fridgeOverlays) / sizeof(fridgeOverlays[0]));
+        // NO overlays. The banner callback draws incoming-message popups straight over
+        // the readings - on a monitor whose entire job is to show a number, an overlay
+        // that hides that number is worse than the message being missed. There is no
+        // message UI on this build anyway, so nothing is lost by never drawing one.
+        ui->setOverlays(nullptr, 0);
 
         prevFrame = -1;
 

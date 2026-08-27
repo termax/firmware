@@ -214,6 +214,7 @@ class MoonFridgeModule : public concurrency::OSThread
     bool shownAlarm = false;
 
     bool probesLoaded = false;
+    bool started = false;   // first runOnce() does the load; the constructor is too early
     bool alarmMuted = false;
     uint8_t framesBuiltFor = 0xFF; // roster size the frameset was last built for
     uint32_t nextReportAt = 0;
