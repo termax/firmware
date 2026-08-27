@@ -246,6 +246,10 @@ class MoonFridgeModule : public concurrency::OSThread
     // per probe, which at sixteen probes would be a sixteen-packet burst every repeat.
     uint32_t alarmMask = 0;
     uint32_t faultMask = 0;
+    // Whether THIS boot has ever announced its fault/alarm state. Without these, a reboot
+    // silently orphans whatever the mesh was last told - see the note in evaluate().
+    bool faultAnnounced = false;
+    bool alarmAnnounced = false;
     uint32_t alarmMsgAt = 0;
     uint32_t faultMsgAt = 0;
     // Bumped on every configuration change and carried in every heartbeat, so a listener

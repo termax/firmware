@@ -546,17 +546,27 @@ void MoonFridgeModule::evaluate(uint32_t now)
             sendSegmented(prefix, body);
             if (alarmSetChanged)
                 alarmMuted = false; // any NEW probe alarming re-arms the buzzer
-        } else if (alarmMask) {
+        } else if (alarmMask || !alarmAnnounced) {
             snprintf(prefix, sizeof(prefix), "FRIDGE CLEAR v%u", (unsigned)configEpoch);
             sendLine(prefix);
         }
         alarmMask = latched;
+        alarmAnnounced = true;
         alarmMsgAt = now;
     }
 
     // Faults are coalesced the same way, and for the same reason: a whole bus dropping out
     // is precisely when a per-probe storm would be worst.
-    const bool faultSetChanged = (faulted != faultMask);
+    // The first pass after a boot ALWAYS announces, even when there is nothing wrong.
+    //
+    // faultMask/alarmMask are in-memory records of what the mesh was last told, and they
+    // start at 0. So a node that rebooted while a fault was outstanding came up with
+    // faulted == 0 and faultMask == 0, took the "nothing changed" branch, and never sent
+    // the all-clear. Downstream kept displaying a fault that no longer existed, forever,
+    // with no way to learn otherwise. Seen 2026-08-27: MVT1's last word to the mesh was
+    // FAULT|P1|P2 at 22:09; the probes were repaired and all eight read fine from 22:49,
+    // and FleetView still showed two faulted probes because the clear was never sent.
+    const bool faultSetChanged = (faulted != faultMask) || !faultAnnounced;
     const bool faultRepeatDue = faulted && (now - faultMsgAt) >= ALARM_REPEAT_MS;
     if (faultSetChanged || faultRepeatDue) {
         char body[400];
@@ -574,11 +584,12 @@ void MoonFridgeModule::evaluate(uint32_t now)
         if (faulted) {
             snprintf(prefix, sizeof(prefix), "FRIDGE FAULT v%u%s", (unsigned)configEpoch, faultSetChanged ? "" : " rpt");
             sendSegmented(prefix, body);
-        } else if (faultMask) {
+        } else if (faultMask || !faultAnnounced) {
             snprintf(prefix, sizeof(prefix), "FRIDGE OK v%u", (unsigned)configEpoch);
             sendLine(prefix);
         }
         faultMask = faulted;
+        faultAnnounced = true;
         faultMsgAt = now;
     }
 
@@ -1184,6 +1195,18 @@ int8_t MoonFridgeModule::resolveProbe(const char *token) const
     for (uint8_t i = 0; i < numProbes; i++)
         if (probes[i].name[0] && strcasecmp(probes[i].name, token) == 0)
             return (int8_t)i;
+
+    // Finally the default label. "P3" is what every message and the panel show for an
+    // unnamed probe, so it must be accepted back: publishing a label and then rejecting
+    // it as input is a trap for anything driving this from the other end, and it bit
+    // FleetView on 2026-08-27 ("no probe 'P3' (8 known)" while P3 was plainly on screen).
+    // Checked last, so an explicit name always wins if someone really names a probe "P3".
+    if (token[0] == 'P' || token[0] == 'p') {
+        char *lend = nullptr;
+        long slot = strtol(token + 1, &lend, 10);
+        if (token[1] && lend && *lend == '\0' && slot >= 1 && slot <= (long)numProbes)
+            return (int8_t)(slot - 1);
+    }
     return -1;
 }
 
