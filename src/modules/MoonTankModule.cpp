@@ -134,8 +134,20 @@ void MoonTankModule::measure()
              MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM);
 
 #if HAS_SCREEN
-    if (screen)
+    // Repaint only when the number on the panel would actually change.
+    //
+    // This used to forceDisplay() on every sample, i.e. every MOONHUT_TANK_POLL_S: 69
+    // repaints in 260 s, measured. With EINK_LIMIT_FASTREFRESH=10 every eleventh is a
+    // full-refresh flash, so the panel's ~1e6-refresh budget would be spent in weeks -
+    // all of it redisplaying millimetres of ultrasonic noise that round to the same
+    // number on screen. Polling stays fast because the READING should be current; the
+    // panel only needs repainting when it would look different.
+    const bool appeared = isnan(shownM) != isnan(lastM);
+    const bool moved = !isnan(lastM) && !isnan(shownM) && fabsf(lastM - shownM) >= MOONHUT_TANK_REDRAW_DELTA_M;
+    if (screen && (appeared || moved)) {
+        shownM = lastM;
         screen->forceDisplay();
+    }
 #endif
 }
 

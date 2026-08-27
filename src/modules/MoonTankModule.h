@@ -72,6 +72,12 @@
 #ifndef MOONHUT_TANK_REPORT_DELTA_M
 #define MOONHUT_TANK_REPORT_DELTA_M 0.02f
 #endif
+// How much the distance must move before the PANEL is repainted. Unrelated to the
+// reporting delta: this one only protects the e-ink from being burned through.
+#ifndef MOONHUT_TANK_REDRAW_DELTA_M
+#define MOONHUT_TANK_REDRAW_DELTA_M 0.01f
+#endif
+
 // The floor under EVERY report. Without one, a change-triggered report bypassed the
 // heartbeat interval completely and could fire at the poll rate.
 #ifndef MOONHUT_TANK_MIN_REPORT_S
@@ -127,6 +133,7 @@ class MoonTankModule : public concurrency::OSThread
     const char *reject = nullptr;
     float reportedM = NAN;
     float pendingM = NAN;          // a candidate change, not yet confirmed by a second reading
+    float shownM = NAN;            // what the panel is currently displaying
     uint32_t nextReportAt = 0;
     uint32_t nextMinReportAt = 0;  // floor under every report, change-triggered ones included
     uint32_t screenOnSince = 0;
