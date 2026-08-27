@@ -56,7 +56,22 @@ static constexpr uint32_t HOLD_LAST_GOOD_MS = 60 * 1000UL;
 // that it is impossible: a sealed probe in a thermal mass cannot move this fast.
 // Generous enough never to reject a real change, tight enough to catch a bit-flip
 // that lands tens of degrees away.
-static constexpr float MAX_SLEW_C_PER_S = 2.0f;
+// 2.0 C/s was far too generous: it permits 120 C per MINUTE, so corrupted reads could
+// walk from 25 C to 80 C in easy 12 C steps and every one of them passed the gate.
+// Observed live - P2 read 79.9 C five seconds after 28.1 C and was back at 28.0 C
+// sixteen seconds later, which no probe in a stainless sheath can physically do.
+//
+// But RATE ALONE CANNOT TELL corruption from a real fast change. A probe dipped in
+// boiling water to identify it - which is exactly how this bench got labelled - really
+// does go from 28 C to 80 C in five seconds: a thin stainless sheath has a time constant
+// of seconds in water, whatever it does in air. Rejecting on rate alone would blind the
+// panel during the one procedure where you most need to watch a number move.
+//
+// The honest discriminator is PERSISTENCE, not speed. A real change stays; corruption
+// does not. So a jump past the slew gate is held as "pending" and accepted the moment
+// the NEXT sample agrees with it - costing one sample of delay - while a lone excursion
+// that snaps back is dropped and counted as a glitch.
+static constexpr float MAX_SLEW_C_PER_S = 0.2f;
 static constexpr float SPIKE_FLOOR_C = 2.0f;
 static constexpr uint32_t SPIKE_WINDOW_MS = 60 * 1000UL;
 
@@ -409,13 +424,22 @@ void MoonFridgeModule::readAll()
             c = dallas.getTempC(p.addr);
         }
 
-        const bool usable = plausible(c) && !isSpike(p, c, now);
+        bool usable = plausible(c) && !isSpike(p, c, now);
+
+        // A jump the slew gate rejected, confirmed by the very next sample, is a real
+        // physical change - a probe moved, or dipped in hot water - not a bus glitch.
+        if (!usable && plausible(c) && !isnan(p.pendingC) && fabsf(c - p.pendingC) <= SPIKE_FLOOR_C) {
+            LOG_INFO("MoonFridge: %s confirmed a fast change to %.1f C (was %.1f)", probeName(i), c, p.tempC);
+            usable = true;
+        }
+
         if (usable) {
             p.tempC = c;
             p.valid = true;
             p.warmingUp = false;
             p.lastGoodMs = now;
             p.badReads = 0;
+            p.pendingC = NAN;
             continue;
         }
 
@@ -424,13 +448,15 @@ void MoonFridgeModule::readAll()
         if (p.warmingUp && c == 85.0f)
             continue;
 
+        // Remember it, so the next sample can confirm it as a real change.
+        p.pendingC = plausible(c) ? c : NAN;
         p.badReads++;
         p.glitches++;
         if (p.valid && p.badReads < BAD_READS_TO_INVALIDATE && (now - p.lastGoodMs) < HOLD_LAST_GOOD_MS) {
             // Ride it out on the last good value. This is the whole point: a glitch
             // must not blank the panel or fire a fault for one bad slot.
-            LOG_DEBUG("MoonFridge: %s glitch %.1f C ignored (%u of %u)", probeName(i), c, p.badReads,
-                      BAD_READS_TO_INVALIDATE);
+            LOG_WARN("MoonFridge: %s glitch %.1f C ignored (%u of %u, holding %.1f)", probeName(i), c, p.badReads,
+                     BAD_READS_TO_INVALIDATE, p.tempC);
             continue;
         }
 

@@ -310,7 +310,15 @@ void MoonTankModule::serviceScreen(uint32_t now)
     if (!screen)
         return;
 
-    const bool onUsb = !powerStatus || powerStatus->getHasUSB();
+    // Decide by BATTERY PRESENCE, not getHasUSB(): that returns false on this board even
+    // on mains, which blanked a panel that was supposed to stay lit. getHasBattery() is
+    // the signal that actually works here - Meshtastic reports batteryLevel 101 when
+    // there is no battery, which is precisely the "externally powered" case.
+    //
+    // Deliberately biased: anything uncertain counts as external power. Failing to sleep
+    // on battery costs some charge; failing to stay lit on mains defeats the whole device.
+    const bool onBattery = powerStatus && powerStatus->getHasBattery() && !powerStatus->getHasUSB();
+    const bool onUsb = !onBattery;
 
     if (onUsb != wasOnUsb) {
         wasOnUsb = onUsb;

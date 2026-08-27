@@ -156,6 +156,7 @@ class MoonFridgeModule : public concurrency::OSThread
         uint8_t badReads = 0;      // consecutive rejected readings
         uint32_t glitches = 0;     // lifetime rejected readings - a degrading joint shows
                                    // up here as a rising rate long before it fails
+        float pendingC = NAN;      // a fast jump awaiting confirmation by the next sample
         uint32_t alarmSentMs = 0;  // last time this probe's alarm was announced
         uint32_t lastGoodMs = 0;
         uint32_t aboveSinceMs = 0; // 0 = not currently outside its band
