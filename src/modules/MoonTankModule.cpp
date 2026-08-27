@@ -3,6 +3,7 @@
 #ifdef MOONHUT_TANK
 
 #include "MeshService.h"
+#include "PowerStatus.h"
 #include "configuration.h"
 #include "mesh/Channels.h"
 #include "mesh/Router.h"
@@ -297,10 +298,60 @@ void MoonTankModule::report(bool force)
     nextReportAt = now + (MOONHUT_TANK_REPORT_S * 1000UL);
 }
 
+// Keep the panel lit on external power, and honest on battery.
+//
+// e-ink keeps its last image with the power off, which is a trap: a blanked panel still
+// displays a number, so "asleep" and "showing a stale reading" look identical from the
+// front. On battery the panel is therefore woken briefly once an hour so what it shows
+// is never more than an hour old.
+void MoonTankModule::serviceScreen(uint32_t now)
+{
+#if HAS_SCREEN
+    if (!screen)
+        return;
+
+    const bool onUsb = !powerStatus || powerStatus->getHasUSB();
+
+    if (onUsb != wasOnUsb) {
+        wasOnUsb = onUsb;
+        LOG_INFO("MoonTank: power source is now %s - screen %s", onUsb ? "external" : "battery",
+                 onUsb ? "stays on" : "will sleep and refresh hourly");
+    }
+
+    if (onUsb) {
+        // Mains: never blank. If it went dark on battery earlier, bring it back.
+        if (screenOffSince) {
+            screen->setOn(true);
+            screenOffSince = 0;
+            screenOnSince = now;
+        }
+        return;
+    }
+
+    if (screenOffSince == 0) {
+        if (screenOnSince == 0)
+            screenOnSince = now;
+        if ((now - screenOnSince) >= (MOONHUT_TANK_BATT_SCREEN_ON_S * 1000UL)) {
+            screen->setOn(false);
+            screenOffSince = now;
+        }
+    } else if ((now - screenOffSince) >= (MOONHUT_TANK_BATT_REFRESH_S * 1000UL)) {
+        // Hourly: wake, let the frame redraw with a current reading, then it blanks
+        // again after the on-period above.
+        screen->setOn(true);
+        screen->forceDisplay();
+        screenOffSince = 0;
+        screenOnSince = now;
+        LOG_INFO("MoonTank: hourly panel refresh on battery");
+    }
+#endif
+}
+
 int32_t MoonTankModule::runOnce()
 {
     measure();
     report(false);
+    serviceScreen(millis());
     return MOONHUT_TANK_POLL_S * 1000;
 }
 

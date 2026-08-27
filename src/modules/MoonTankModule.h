@@ -56,6 +56,18 @@
 #define MOONHUT_TANK_MAX_SPREAD_M 0.10f
 #endif
 
+// Screen policy. On external power the panel never blanks - the whole point of the box
+// is a reading you can see. On battery it is allowed to sleep, but e-ink holds its last
+// image without power, so a sleeping panel keeps SHOWING a number that is quietly going
+// stale. Waking it briefly once an hour keeps that number honest for the cost of one
+// refresh.
+#ifndef MOONHUT_TANK_BATT_SCREEN_ON_S
+#define MOONHUT_TANK_BATT_SCREEN_ON_S 60
+#endif
+#ifndef MOONHUT_TANK_BATT_REFRESH_S
+#define MOONHUT_TANK_BATT_REFRESH_S 3600
+#endif
+
 // Report on a change this big, or on the heartbeat below, whichever comes first.
 #ifndef MOONHUT_TANK_REPORT_DELTA_M
 #define MOONHUT_TANK_REPORT_DELTA_M 0.02f
@@ -95,6 +107,7 @@ class MoonTankModule : public concurrency::OSThread
     void measure();
     void diagnose();   // runs after repeated silence: says WHY there is no echo
     void report(bool force);
+    void serviceScreen(uint32_t now);
     void sendLine(const char *text);
 
     float lastM = NAN;
@@ -108,6 +121,9 @@ class MoonTankModule : public concurrency::OSThread
     const char *reject = nullptr;
     float reportedM = NAN;
     uint32_t nextReportAt = 0;
+    uint32_t screenOnSince = 0;
+    uint32_t screenOffSince = 0;   // 0 = the panel is lit
+    bool wasOnUsb = true;
 };
 
 extern MoonTankModule *moonTankModule;

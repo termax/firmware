@@ -854,7 +854,7 @@ void NodeDB::initConfigIntervals()
     config.power.wait_bluetooth_secs = 30;
 #endif
 
-#if defined(MOONHUT_FRIDGE_ONLY)
+#if defined(MOONHUT_FRIDGE_ONLY) || defined(MOONHUT_TANK_ONLY)
     // A mains-powered fridge monitor must never blank. 0 is the documented e-ink kill
     // switch: PowerFSM skips the ON->DARK transitions entirely at that value.
     //
