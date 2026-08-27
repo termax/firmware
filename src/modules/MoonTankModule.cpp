@@ -353,12 +353,20 @@ void MoonTankModule::serviceScreen(uint32_t now)
     }
 
     if (onUsb) {
-        // Mains: never blank. If it went dark on battery earlier, bring it back.
-        if (screenOffSince) {
+        // Mains: never blank, and RE-ASSERT it rather than only undoing our own sleep.
+        //
+        // PowerFSM darkens the panel on its own timer whenever config.display.screen_on_secs
+        // is non-zero (PowerFSM.cpp:380), without ever passing through this module. The
+        // first version only tracked the sleep IT had caused, so a PowerFSM blank left
+        // screenOffSince at 0 and the panel stayed dark on mains for good - the exact
+        // failure this policy exists to prevent. Ask the screen what it is actually doing.
+        if (!screen->isScreenOn()) {
+            LOG_INFO("MoonTank: panel was dark on external power - waking it");
             screen->setOn(true);
-            screenOffSince = 0;
-            screenOnSince = now;
+            screen->forceDisplay();
         }
+        screenOffSince = 0;
+        screenOnSince = now;
         return;
     }
 
