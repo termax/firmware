@@ -72,6 +72,12 @@
 #ifndef MOONHUT_TANK_REPORT_DELTA_M
 #define MOONHUT_TANK_REPORT_DELTA_M 0.02f
 #endif
+// The floor under EVERY report. Without one, a change-triggered report bypassed the
+// heartbeat interval completely and could fire at the poll rate.
+#ifndef MOONHUT_TANK_MIN_REPORT_S
+#define MOONHUT_TANK_MIN_REPORT_S 120
+#endif
+
 #ifndef MOONHUT_TANK_REPORT_S
 #define MOONHUT_TANK_REPORT_S 60
 #endif
@@ -120,7 +126,9 @@ class MoonTankModule : public concurrency::OSThread
     bool diagnosed = false;
     const char *reject = nullptr;
     float reportedM = NAN;
+    float pendingM = NAN;          // a candidate change, not yet confirmed by a second reading
     uint32_t nextReportAt = 0;
+    uint32_t nextMinReportAt = 0;  // floor under every report, change-triggered ones included
     uint32_t screenOnSince = 0;
     uint32_t screenOffSince = 0;   // 0 = the panel is lit
     bool wasOnUsb = true;

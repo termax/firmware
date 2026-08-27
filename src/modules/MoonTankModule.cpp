@@ -281,7 +281,31 @@ void MoonTankModule::report(bool force)
 {
     const uint32_t now = millis();
     const bool due = (int32_t)(now - nextReportAt) >= 0;
-    const bool moved = !isnan(lastM) && (isnan(reportedM) || fabsf(lastM - reportedM) >= MOONHUT_TANK_REPORT_DELTA_M);
+
+    // A change worth an out-of-band report, CONFIRMED by a second reading before it is
+    // believed. The raw sensor wanders further than the delta on a target that is not
+    // moving, so an unconfirmed change re-fired on almost every poll: 140 messages/hour,
+    // median gap 15s, minimum 1s. That is a mesh problem by itself, and it is the prime
+    // suspect for the RF that kept killing the gateway's USB port on 2026-08-27.
+    bool moved = false;
+    if (!isnan(lastM)) {
+        if (isnan(reportedM)) {
+            moved = true;
+        } else if (fabsf(lastM - reportedM) >= MOONHUT_TANK_REPORT_DELTA_M) {
+            // Believe it only when the previous sample said the same thing.
+            moved = !isnan(pendingM) && fabsf(lastM - pendingM) < MOONHUT_TANK_REPORT_DELTA_M;
+            pendingM = lastM;
+        } else {
+            pendingM = NAN;
+        }
+    }
+
+    // Even a confirmed change waits for the floor. A tank that is genuinely filling would
+    // otherwise broadcast at the poll rate for as long as it kept moving.
+    if (moved && (int32_t)(now - nextMinReportAt) < 0) {
+        moved = false;
+    }
+
     if (!force && !due && !moved)
         return;
 
@@ -295,7 +319,9 @@ void MoonTankModule::report(bool force)
     sendLine(line);
 
     reportedM = lastM;
+    pendingM = NAN;
     nextReportAt = now + (MOONHUT_TANK_REPORT_S * 1000UL);
+    nextMinReportAt = now + (MOONHUT_TANK_MIN_REPORT_S * 1000UL);
 }
 
 // Keep the panel lit on external power, and honest on battery.
