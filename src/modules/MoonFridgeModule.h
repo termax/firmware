@@ -36,6 +36,16 @@
 #define MOONHUT_FRIDGE_MAX_PROBES 4
 #endif
 
+// Status LEDs, visible through the enclosure. Green means every probe is inside its
+// band and answering; red means something needs a human. Undefine either to omit it.
+//   solid green  - all well
+//   solid red    - at least one probe is in alarm
+//   blinking red - a probe has stopped answering (a different problem from a warm
+//                  fridge, and one you would otherwise only notice on the panel)
+#ifndef MOONHUT_LED_FAULT_BLINK_MS
+#define MOONHUT_LED_FAULT_BLINK_MS 700
+#endif
+
 // Longest operator-assigned probe name, including the terminator. Kept short on
 // purpose: it is drawn above the temperature in a column that is only a quarter of
 // a 296 px panel wide when four probes are fitted.
@@ -179,6 +189,8 @@ class MoonFridgeModule : public concurrency::OSThread
     void readAll();
     void evaluate(uint32_t now);
     void serviceBuzzer(uint32_t now);
+    void serviceLeds(uint32_t now);
+    void serviceButton(uint32_t now);
     void maybeRefreshDisplay();
     static uint8_t buzzerPin();
     static bool plausible(float c);
@@ -217,6 +229,13 @@ class MoonFridgeModule : public concurrency::OSThread
     bool probesLoaded = false;
     bool started = false;   // first runOnce() does the load; the constructor is too early
     bool alarmMuted = false;
+    bool btnInit = false;
+    bool btnDown = false;
+    bool btnLongSent = false;
+    uint32_t btnChangedAt = 0;
+    bool ledsInit = false;
+    bool ledBlinkOn = false;
+    uint32_t ledBlinkAt = 0;
     uint8_t framesBuiltFor = 0xFF; // roster size the frameset was last built for
     uint32_t nextReportAt = 0;
     uint32_t nextCfgReportAt = 0;

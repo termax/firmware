@@ -13,6 +13,7 @@
 
 #if HAS_SCREEN
 #include "graphics/Screen.h"
+#include "input/InputBroker.h"
 #endif
 
 // Only repaint the e-ink when a reading actually moves. A panel refresh is slow and
@@ -658,6 +659,100 @@ void MoonFridgeModule::muteAlarm()
     if (pin)
         noTone(pin);
     LOG_INFO("MoonFridge: buzzer muted by hand - the alarm is still active and still reported");
+}
+
+// A panel button, POLLED rather than interrupt-driven.
+//
+// The first version attached an ISR to this pin, and flashing it to a node where nothing
+// was wired to that pin stormed the scheduler: USB still enumerated, so the port appeared
+// and everything looked fine, while serial, the radio and the CLI were all starved. It
+// took a manual bootloader entry to recover.
+//
+// Polling costs nothing on a mains-powered node that is already awake every 50 ms, is far
+// more responsive than a finger needs, and an unconnected pin simply reads HIGH and does
+// nothing at all. Responsiveness was never worth that failure mode.
+void MoonFridgeModule::serviceButton(uint32_t now)
+{
+#ifdef MOONHUT_EXT_BUTTON_PIN
+    if (!btnInit) {
+        btnInit = true;
+        pinMode(MOONHUT_EXT_BUTTON_PIN, INPUT_PULLUP);
+        btnChangedAt = now;
+        return;
+    }
+
+    const bool down = !digitalRead(MOONHUT_EXT_BUTTON_PIN); // active low, to GND
+    if (down != btnDown) {
+        if ((now - btnChangedAt) < 40) // debounce
+            return;
+        btnChangedAt = now;
+        if (down) {
+            btnDown = true;
+            btnLongSent = false;
+        } else {
+            btnDown = false;
+            if (!btnLongSent) {
+                LOG_INFO("MoonFridge: button - next view");
+                if (screen)
+                    screen->showNextFrame();
+            }
+        }
+        return;
+    }
+
+    // Held past the long-press threshold: silence the buzzer, once per press.
+    if (btnDown && !btnLongSent && (now - btnChangedAt) >= 500) {
+        btnLongSent = true;
+        LOG_INFO("MoonFridge: button held - muting");
+        muteAlarm();
+    }
+#else
+    (void)now;
+#endif
+}
+
+// Green = all well, red = alarm, blinking red = a probe is not answering.
+//
+// Deliberately three states, not two. A silent probe and a warm fridge are different
+// problems with different responses, and if both showed the same red light the operator
+// would open the fridge when they should be checking a connector. Green being lit is
+// also a positive statement that the node is alive - a dark panel and a dark LED look
+// the same as a dead node, which is exactly what you do not want to be ambiguous.
+
+void MoonFridgeModule::serviceLeds(uint32_t now)
+{
+#if defined(MOONHUT_LED_GREEN_PIN) || defined(MOONHUT_LED_RED_PIN)
+    if (!ledsInit) {
+        ledsInit = true;
+#ifdef MOONHUT_LED_GREEN_PIN
+        pinMode(MOONHUT_LED_GREEN_PIN, OUTPUT);
+#endif
+#ifdef MOONHUT_LED_RED_PIN
+        pinMode(MOONHUT_LED_RED_PIN, OUTPUT);
+#endif
+    }
+
+    const bool faulted = probeFault();
+    const bool ok = !alarm && !faulted;
+
+    if (faulted && !alarm) {
+        if ((int32_t)(now - ledBlinkAt) >= 0) {
+            ledBlinkOn = !ledBlinkOn;
+            ledBlinkAt = now + MOONHUT_LED_FAULT_BLINK_MS;
+        }
+    } else {
+        ledBlinkOn = false;
+    }
+
+#ifdef MOONHUT_LED_GREEN_PIN
+    digitalWrite(MOONHUT_LED_GREEN_PIN, ok ? HIGH : LOW);
+#endif
+#ifdef MOONHUT_LED_RED_PIN
+    digitalWrite(MOONHUT_LED_RED_PIN, (alarm || ledBlinkOn) ? HIGH : LOW);
+#endif
+#else
+    (void)now;
+#endif
 }
 
 void MoonFridgeModule::serviceBuzzer(uint32_t now)
@@ -1322,6 +1417,8 @@ int32_t MoonFridgeModule::runOnce()
     }
 
     serviceBuzzer(now);
+    serviceButton(now);
+    serviceLeds(now);
 
     // Sleep only as long as the nearest pending event allows.
     uint32_t target = (phase == Phase::Read) ? readReadyAt : nextSampleAt;
@@ -1335,6 +1432,20 @@ int32_t MoonFridgeModule::runOnce()
         if (beepDelay < delay)
             delay = beepDelay;
     }
+#if defined(MOONHUT_LED_RED_PIN)
+    // A blinking fault LED needs waking for, or it would only toggle once per sample.
+    if (probeFault() && !alarm) {
+        int32_t blinkDelay = (int32_t)(ledBlinkAt - now);
+        if (blinkDelay < 0)
+            blinkDelay = 0;
+        if (blinkDelay < delay)
+            delay = blinkDelay;
+    }
+#endif
+#ifdef MOONHUT_EXT_BUTTON_PIN
+    if (delay > 50) // a finger needs polling far more often than a fridge does
+        delay = 50;
+#endif
     return delay > 0 ? delay : 10;
 }
 
