@@ -122,6 +122,8 @@ void MoonTankModule::measure()
 
     lastM = median;
 
+    recordLevel(millis(), lastM);
+
     if (isnan(sessionMinM) || lastM < sessionMinM)
         sessionMinM = lastM;
     if (isnan(sessionMaxM) || lastM > sessionMaxM)
@@ -289,6 +291,52 @@ void MoonTankModule::sendLine(const char *text)
     LOG_INFO("MoonTank: sent %s", text);
 }
 
+// Keep one sample a minute at most. Polling is every 2 s for a live panel, but a rate fit
+// wants spread-out points: 16 samples two seconds apart span 30 s and would measure noise.
+void MoonTankModule::recordLevel(uint32_t now, float metres)
+{
+    if (isnan(metres))
+        return; // never let a rejected reading into the fit
+    if (rateCount && (now - lastRateAt) < (MOONHUT_TANK_RATE_DECIMATE_S * 1000UL))
+        return;
+    lastRateAt = now;
+    rateBuf[rateHead] = {now, metres};
+    rateHead = (uint8_t)((rateHead + 1) % MOONHUT_TANK_RATE_SAMPLES);
+    if (rateCount < MOONHUT_TANK_RATE_SAMPLES)
+        rateCount++;
+}
+
+// Least-squares slope of distance against time, negated so the answer is LEVEL change.
+float MoonTankModule::levelRateMph() const
+{
+    if (rateCount < 3)
+        return NAN;
+
+    // Oldest sample first, so the time base is monotonic across the ring wrap.
+    const uint8_t start = (uint8_t)((rateHead + MOONHUT_TANK_RATE_SAMPLES - rateCount) % MOONHUT_TANK_RATE_SAMPLES);
+    const uint32_t t0 = rateBuf[start].atMs;
+    const uint32_t span = rateBuf[(uint8_t)((rateHead + MOONHUT_TANK_RATE_SAMPLES - 1) % MOONHUT_TANK_RATE_SAMPLES)].atMs - t0;
+    if (span < (MOONHUT_TANK_RATE_MIN_SPAN_S * 1000UL))
+        return NAN; // too short a window to mean anything
+
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (uint8_t i = 0; i < rateCount; i++) {
+        const RateSample &r = rateBuf[(uint8_t)((start + i) % MOONHUT_TANK_RATE_SAMPLES)];
+        const double x = (double)(r.atMs - t0) / 3600000.0; // hours
+        const double y = (double)r.m;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    const double n = (double)rateCount;
+    const double denom = n * sxx - sx * sx;
+    if (denom <= 0)
+        return NAN;
+    const double slope = (n * sxy - sx * sy) / denom; // metres of DISTANCE per hour
+    return (float)(-slope);                           // negate: distance down = level up
+}
+
 void MoonTankModule::report(bool force)
 {
     const uint32_t now = millis();
@@ -321,14 +369,41 @@ void MoonTankModule::report(bool force)
     if (!force && !due && !moved)
         return;
 
-    char line[128];
-    if (isnan(lastM))
+    char line[160];
+    if (isnan(lastM)) {
         snprintf(line, sizeof(line), "TANK|d=?|e=%u/%u|why=%s", lastValid, MOONHUT_TANK_SAMPLES,
                  reject ? reject : "no echo");
-    else
-        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|min=%.3f|max=%.3f", lastM, lastSpreadM, lastValid,
-                 MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM);
+    } else {
+        // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a
+        // long enough window - an unknown rate is said out loud rather than sent as 0.000,
+        // which a consumer would otherwise plot as "perfectly steady".
+        const float rate = levelRateMph();
+        char r[16];
+        if (isnan(rate))
+            snprintf(r, sizeof(r), "?");
+        else
+            snprintf(r, sizeof(r), "%+.3f", (double)rate);
+        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|min=%.3f|max=%.3f|r=%s", lastM, lastSpreadM,
+                 lastValid, MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM, r);
+    }
     sendLine(line);
+
+    // Fast-drain alert, edge-triggered both ways so it cannot spam. Disabled unless a
+    // threshold has been set for this tank - see the note in the header.
+    if (MOONHUT_TANK_FAST_DRAIN_MPH > 0.0f) {
+        const float rate = levelRateMph();
+        const bool draining = !isnan(rate) && rate <= -MOONHUT_TANK_FAST_DRAIN_MPH;
+        if (draining && !drainAlarm) {
+            drainAlarm = true;
+            char a[96];
+            snprintf(a, sizeof(a), "TANK ALARM|fast drain|r=%+.3f|limit=%.3f", (double)rate,
+                     (double)MOONHUT_TANK_FAST_DRAIN_MPH);
+            sendLine(a);
+        } else if (!draining && drainAlarm && !isnan(rate)) {
+            drainAlarm = false;
+            sendLine("TANK CLEAR|drain back within limit");
+        }
+    }
 
     reportedM = lastM;
     pendingM = NAN;
@@ -348,14 +423,34 @@ void MoonTankModule::serviceScreen(uint32_t now)
     if (!screen)
         return;
 
-    // Decide by BATTERY PRESENCE, not getHasUSB(): that returns false on this board even
-    // on mains, which blanked a panel that was supposed to stay lit. getHasBattery() is
-    // the signal that actually works here - Meshtastic reports batteryLevel 101 when
-    // there is no battery, which is precisely the "externally powered" case.
+    // Sleep ONLY on positive evidence of battery operation. Never on the absence of
+    // evidence of mains.
     //
-    // Deliberately biased: anything uncertain counts as external power. Failing to sleep
-    // on battery costs some charge; failing to stay lit on mains defeats the whole device.
-    const bool onBattery = powerStatus && powerStatus->getHasBattery() && !powerStatus->getHasUSB();
+    // PowerStatus is TRI-state: getHasUSB() is `hasUSB == OptTrue`, so an UNKNOWN reading
+    // returns false, indistinguishable from "definitely no USB". The previous test was
+    //
+    //     hasBattery && !getHasUSB()
+    //
+    // which quietly turned "don't know" into "on battery". Fit a battery to a mains node -
+    // as MoonTank now has - and the panel slept 60 s after every boot while sitting on a
+    // charger, which is the exact failure this policy exists to prevent. The comment above
+    // it even said not to trust getHasUSB(), while the code depended on it.
+    //
+    // Charging is the most useful signal of the three: a cell cannot charge without an
+    // external supply, and unlike getHasUSB() it is derived from a measurement rather than
+    // a pin some boards do not wire up.
+#ifdef MOONHUT_TANK_NEVER_SLEEP
+    // Mains installation: the question does not arise. Declared per-variant rather than
+    // inferred, because a permanently-powered node should not depend on power detection
+    // working correctly on a board where it demonstrably does not.
+    const bool onBattery = false;
+#else
+    const bool external = !powerStatus                     // no reading at all: assume mains
+                          || !powerStatus->getHasBattery() // nothing to run from anyway
+                          || powerStatus->getHasUSB()      // positively told USB is there
+                          || powerStatus->getIsCharging(); // can only happen on external power
+    const bool onBattery = !external;
+#endif
     const bool onUsb = !onBattery;
 
     if (onUsb != wasOnUsb) {

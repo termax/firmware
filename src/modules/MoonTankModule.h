@@ -72,6 +72,37 @@
 #ifndef MOONHUT_TANK_REPORT_DELTA_M
 #define MOONHUT_TANK_REPORT_DELTA_M 0.02f
 #endif
+// --- Rate of level change -------------------------------------------------
+//
+// Reported as LEVEL metres per hour: positive = filling, negative = draining.
+// Note the sign flip against the raw measurement - the sensor reads distance DOWN to the
+// surface, so a rising distance means a FALLING level. Publishing the raw derivative would
+// invert every reading a human looks at.
+//
+// Least-squares slope over a window, not a first-to-last difference: this sensor's noise is
+// tens of millimetres, and a two-point difference would report that noise divided by the
+// interval as if it were a flow rate.
+#ifndef MOONHUT_TANK_RATE_SAMPLES
+#define MOONHUT_TANK_RATE_SAMPLES 16 // ring depth
+#endif
+
+#ifndef MOONHUT_TANK_RATE_DECIMATE_S
+#define MOONHUT_TANK_RATE_DECIMATE_S 60 // keep at most one sample a minute
+#endif
+
+// Below this span the slope is not published at all. A rate fitted over a couple of minutes
+// of a noisy signal is a random number with units attached.
+#ifndef MOONHUT_TANK_RATE_MIN_SPAN_S
+#define MOONHUT_TANK_RATE_MIN_SPAN_S 300 // 5 min
+#endif
+
+// Fast-drain alert. DISABLED by default (0) and it should stay that way until this tank's
+// normal draw has been observed: a threshold guessed before the first day of real data is
+// just a source of false alarms, and an alert nobody trusts is worse than no alert.
+#ifndef MOONHUT_TANK_FAST_DRAIN_MPH
+#define MOONHUT_TANK_FAST_DRAIN_MPH 0.0f
+#endif
+
 // How much the distance must move before the PANEL is repainted. Unrelated to the
 // reporting delta: this one only protects the e-ink from being burned through.
 #ifndef MOONHUT_TANK_REDRAW_DELTA_M
@@ -121,6 +152,19 @@ class MoonTankModule : public concurrency::OSThread
     void report(bool force);
     void serviceScreen(uint32_t now);
     void sendLine(const char *text);
+    void recordLevel(uint32_t now, float metres);
+    float levelRateMph() const; // metres/hour, + = filling, NAN if not enough span
+
+    // Ring of decimated (time, distance) samples, for the least-squares rate fit.
+    struct RateSample {
+        uint32_t atMs;
+        float m;
+    };
+    RateSample rateBuf[MOONHUT_TANK_RATE_SAMPLES] = {};
+    uint8_t rateCount = 0;
+    uint8_t rateHead = 0;
+    uint32_t lastRateAt = 0;
+    bool drainAlarm = false;
 
     float lastM = NAN;
     float lastSpreadM = NAN;
