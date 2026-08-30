@@ -965,6 +965,24 @@ void Power::readPowerStatus()
     // is 2.0 to 2.5V, current OCV min is set to 3100 that is large enough.
     //
 
+#ifdef MOONHUT_NO_LOW_VOLTAGE_SHUTDOWN
+    // MAINS APPLIANCE: never deep-sleep on a low battery reading.
+    //
+    // This guard exists because the condition below cannot be trusted on the Vision Master
+    // E290. PowerStatus is tri-state, so getHasUSB() returns false for UNKNOWN as well as
+    // for "no USB" - and on this board it reads false even on mains. Meanwhile a board with
+    // NO battery fitted floats its battery ADC at roughly 2.99 V, which getHasBattery()
+    // happily reports as a battery and the OCV table reads as critically flat.
+    //
+    // Both halves therefore assert on false premises and the node shuts itself down. MVT1
+    // did exactly this every 149 seconds on 2026-08-30 while sitting on USB power with no
+    // battery at all: boot, count to 10, deep sleep, and to anyone watching it looked like
+    // failing hardware or a failing cable. It cost two days.
+    //
+    // A permanently-powered appliance has no cell to protect, so the protection is pure
+    // downside. Leave it ON for anything that runs from a battery.
+    (void)batteryLevel;
+#else
     if (batteryLevel && powerStatus2.getHasBattery() && !powerStatus2.getHasUSB()) {
         if (batteryLevel->getBattVoltage() < OCV[NUM_OCV_POINTS - 1]) {
             low_voltage_counter++;
@@ -977,6 +995,7 @@ void Power::readPowerStatus()
             low_voltage_counter = 0;
         }
     }
+#endif
 }
 
 int32_t Power::runOnce()
