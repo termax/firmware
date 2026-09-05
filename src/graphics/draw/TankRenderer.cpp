@@ -40,10 +40,11 @@ void drawLevelFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, 
         display->drawString(midX, cursorY, "set tank:height=<m>");
         cursorY += FONT_HEIGHT_SMALL;
         const float m = moonTankModule->distanceM();
-        char line[40];
-        if (isnan(m))
-            snprintf(line, sizeof(line), "no echo");
-        else
+        char line[48];
+        if (isnan(m)) {
+            const char *why = moonTankModule->rejectReason();
+            snprintf(line, sizeof(line), "%s", why ? why : "no echo");
+        } else
             snprintf(line, sizeof(line), "distance %.3f m", (double)m);
         display->drawString(midX, cursorY, line);
         display->setTextAlignment(TEXT_ALIGN_LEFT);
@@ -64,11 +65,14 @@ void drawLevelFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, 
 
     display->setFont(FONT_SMALL);
     char line[48];
-    if (isnan(lvl))
-        snprintf(line, sizeof(line), "no echo returned");
+    if (isnan(lvl)) {
+        const char *why = moonTankModule->rejectReason();
+        snprintf(line, sizeof(line), "%s", why ? why : "no echo");
+    }
     else
         snprintf(line, sizeof(line), "%.2f m of %.2f m", (double)lvl,
                  (double)(moonTankModule->tankHeight() - moonTankModule->deadTopM()));
+
     display->drawString(midX, cursorY, line);
     cursorY += FONT_HEIGHT_SMALL;
 
@@ -118,7 +122,19 @@ void drawTankFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, i
     display->setFont(FONT_SMALL);
     char line[48];
     if (isnan(m)) {
-        snprintf(line, sizeof(line), "no echo returned");
+        // The REASON, not a hardcoded "no echo". With the consensus filter the usual
+        // failure is echoes that disagree, and saying "no echo" there sent us hunting a
+        // dead sensor while it was returning five returns a second.
+        const char *why = moonTankModule->rejectReason();
+        const float raw = moonTankModule->rawM();
+        if (!why)
+            why = "no echo";
+        if (isnan(raw))
+            snprintf(line, sizeof(line), "%s  %u/%u echoes", why, moonTankModule->validSamples(),
+                     MOONHUT_TANK_SAMPLES);
+        else
+            snprintf(line, sizeof(line), "%s  raw %.2f m  %u/%u", why, (double)raw,
+                     moonTankModule->validSamples(), MOONHUT_TANK_SAMPLES);
     } else {
         snprintf(line, sizeof(line), "spread %.0f mm   %u echoes", moonTankModule->spreadM() * 1000.0f,
                  moonTankModule->validSamples());

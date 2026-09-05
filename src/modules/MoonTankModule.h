@@ -263,6 +263,10 @@ class MoonTankModule : public concurrency::OSThread
     float tankHeight() const { return tankHeightM; }
     float deadTopM() const { return tankOffsetM; }
 
+    /// What the last burst measured, kept even when the gates rejected it. The panel
+    /// shows this so a rejected reading is diagnosable without a serial cable.
+    float rawM() const { return lastRawM; }
+
     /// Water depth in metres, NAN if uncalibrated or the last burst failed.
     float levelM() const;
     /// Fill percentage 0-100, NAN if uncalibrated or the last burst failed.
