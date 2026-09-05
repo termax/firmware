@@ -112,6 +112,22 @@ bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, floa
         why = "too few echoes";
     else if (spread > MOONHUT_TANK_MAX_SPREAD_M)
         why = "samples disagree";
+
+    // Dump the individual pings when a burst is rejected. "samples disagree" without the
+    // samples is the same hole as "d=?" without the raw value: it says something is wrong
+    // and withholds the one thing that says WHAT.
+    //
+    // The SHAPE is the diagnosis. Sorted ascending:
+    //   one low outlier, rest tight   -> transducer ringdown caught on the first ping
+    //   one roughly double the others -> a second reflection (wall, pipe, tank floor)
+    //   scattered with no structure   -> electrical noise, or a transducer not coupling
+    if (why) {
+        char dbg[132];
+        int p = 0;
+        for (uint8_t i = 0; i < n && p < (int)sizeof(dbg) - 12; i++)
+            p += snprintf(dbg + p, sizeof(dbg) - p, "%s%.3f", i ? " " : "", (double)s[i]);
+        LOG_WARN("MoonTank: pings [%s] -> %s", dbg, why);
+    }
     return why == nullptr;
 }
 
