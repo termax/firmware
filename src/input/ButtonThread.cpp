@@ -186,6 +186,12 @@ int32_t ButtonThread::runOnce()
         evt.touchY = 0;
         switch (btnEvent) {
         case BUTTON_EVENT_PRESSED: {
+            // A short press logs NOTHING in stock Meshtastic - only a long-press release
+            // does. That makes "the button does nothing" undiagnosable over serial: an
+            // absence of log lines is equally consistent with a press that never reached
+            // software and with nobody having pressed it. One line settles that, and it
+            // fires at most once per physical press.
+            LOG_INFO("Button: short press on GPIO %u -> event %d", (unsigned)_pinNum, (int)_singlePress);
             // Forward single press to InputBroker (but NOT as DOWN/SELECT, just forward a "button press" event)
             evt.inputEvent = _singlePress;
             // evt.kbchar = _singlePress; // todo: fix this. Some events are kb characters rather than event types
