@@ -111,6 +111,33 @@
 #define MOONHUT_TANK_MAX_SPREAD_M 0.10f
 #endif
 
+// --- Consensus, not range --------------------------------------------------
+//
+// The original gate demanded every sample fall within MAX_SPREAD_M min-to-max. Ping
+// dumps from a JSN showed why that is too brittle: a real target at 1.25 m arrives
+// alongside a fixed ~0.247 m RINGDOWN artifact (the transducer hearing its own burst -
+// it recurs to the millimetre across unrelated bursts) and a tail of later multipath
+// reflections at 1.4-2.1 m. One ringdown sample destroys a min-to-max range on its own,
+// so a perfectly good median was being thrown away every time.
+//
+// Instead: take the median, then count how many samples agree with it within a
+// tolerance. A burst is trusted when enough of them do. That ignores one low artifact
+// and one high reflection without ever averaging them in.
+#ifndef MOONHUT_TANK_AGREE_M
+#define MOONHUT_TANK_AGREE_M 0.10f
+#endif
+#ifndef MOONHUT_TANK_AGREE_MIN
+#define MOONHUT_TANK_AGREE_MIN 3
+#endif
+
+// Near-field floor. Anything closer than this is discarded BEFORE filtering, because on
+// this sensor it is ringdown rather than a target. Raise it above the artifact you
+// actually observe: 0.247 m on the cable-mounted transducer, 0.227 m on the original.
+// The cost is real blindness below this distance - which the JSN has anyway.
+#ifndef MOONHUT_TANK_MIN_VALID_M
+#define MOONHUT_TANK_MIN_VALID_M 0.30f
+#endif
+
 // Screen policy. On external power the panel never blanks - the whole point of the box
 // is a reading you can see. On battery it is allowed to sleep, but e-ink holds its last
 // image without power, so a sleeping panel keeps SHOWING a number that is quietly going

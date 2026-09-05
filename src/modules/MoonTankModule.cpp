@@ -29,7 +29,7 @@ static constexpr float SPEED_OF_SOUND_MS = 343.0f;
 static constexpr uint32_t ECHO_TIMEOUT_US = 25000;
 
 // Below this the sensor is inside its own dead zone and the figure is meaningless.
-static constexpr float MIN_VALID_M = 0.03f;
+static constexpr float MIN_VALID_M = MOONHUT_TANK_MIN_VALID_M;
 static constexpr float MAX_VALID_M = 4.5f;
 
 MoonTankModule::MoonTankModule() : concurrency::OSThread("MoonTank")
@@ -103,15 +103,37 @@ bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, floa
     }
 
     median = s[n / 2];        // median, not mean: one wild echo must not move it
-    spread = s[n - 1] - s[0];
+    // Spread over the samples that AGREE with the median. The full min-to-max range is
+    // dominated by exactly the outliers the consensus test is there to ignore, so
+    // publishing it as the trust indicator made every good burst look untrustworthy.
+    {
+        float lo = median, hi = median;
+        for (uint8_t i = 0; i < n; i++) {
+            if (fabsf(s[i] - median) > MOONHUT_TANK_AGREE_M)
+                continue;
+            if (s[i] < lo)
+                lo = s[i];
+            if (s[i] > hi)
+                hi = s[i];
+        }
+        spread = hi - lo;
+    }
 
     // Two gates, both learned the hard way on the fridge bus: a reading nobody
     // cross-checked, and a reading whose samples disagree, are both worse than no
     // reading at all - because they look exactly as confident as a good one.
+    // Consensus around the median, not min-to-max range. See the header: a single
+    // ringdown sample or one multipath reflection must not veto a burst whose median is
+    // perfectly good.
+    uint8_t agree = 0;
+    for (uint8_t i = 0; i < n; i++)
+        if (fabsf(s[i] - median) <= MOONHUT_TANK_AGREE_M)
+            agree++;
+
     if (n < MOONHUT_TANK_MIN_ECHOES)
         why = "too few echoes";
-    else if (spread > MOONHUT_TANK_MAX_SPREAD_M)
-        why = "samples disagree";
+    else if (agree < MOONHUT_TANK_AGREE_MIN)
+        why = "no consensus";
 
     // Dump the individual pings when a burst is rejected. "samples disagree" without the
     // samples is the same hole as "d=?" without the raw value: it says something is wrong
@@ -126,7 +148,8 @@ bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, floa
         int p = 0;
         for (uint8_t i = 0; i < n && p < (int)sizeof(dbg) - 12; i++)
             p += snprintf(dbg + p, sizeof(dbg) - p, "%s%.3f", i ? " " : "", (double)s[i]);
-        LOG_WARN("MoonTank: pings [%s] -> %s", dbg, why);
+        LOG_WARN("MoonTank: pings [%s] -> %s (%u agreed within %.0f mm of %.3f)", dbg, why, agree,
+                 (double)(MOONHUT_TANK_AGREE_M * 1000.0f), (double)median);
     }
     return why == nullptr;
 }
