@@ -36,20 +36,27 @@ MoonTankModule::MoonTankModule() : concurrency::OSThread("MoonTank")
     pinMode(MOONHUT_TANK_TRIG_PIN, OUTPUT);
     digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
     pinMode(MOONHUT_TANK_ECHO_PIN, INPUT);
-    LOG_INFO("MoonTank: HC-SR04 on TRIG %d / ECHO %d", MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN);
+    LOG_INFO("MoonTank: ranger A on TRIG %d / ECHO %d", MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN);
+#ifdef MOONHUT_TANK_DUAL
+    pinMode(MOONHUT_TANK_TRIG_PIN2, OUTPUT);
+    digitalWrite(MOONHUT_TANK_TRIG_PIN2, LOW);
+    pinMode(MOONHUT_TANK_ECHO_PIN2, INPUT);
+    LOG_INFO("MoonTank: ranger B on TRIG %d / ECHO %d - comparison only, never drives level, rate or alerts",
+             MOONHUT_TANK_TRIG_PIN2, MOONHUT_TANK_ECHO_PIN2);
+#endif
 }
 
-float MoonTankModule::pingOnce()
+float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin)
 {
     // 10 us trigger, per the datasheet. The 2 us LOW first guarantees a clean edge
     // even if something left the line high.
-    digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
+    digitalWrite(trigPin, LOW);
     delayMicroseconds(2);
-    digitalWrite(MOONHUT_TANK_TRIG_PIN, HIGH);
+    digitalWrite(trigPin, HIGH);
     delayMicroseconds(10);
-    digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
+    digitalWrite(trigPin, LOW);
 
-    const uint32_t us = pulseIn(MOONHUT_TANK_ECHO_PIN, HIGH, ECHO_TIMEOUT_US);
+    const uint32_t us = pulseIn(echoPin, HIGH, ECHO_TIMEOUT_US);
     if (us == 0)
         return NAN; // no echo inside the window
 
@@ -60,13 +67,17 @@ float MoonTankModule::pingOnce()
     return m;
 }
 
-void MoonTankModule::measure()
+bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n,
+                           const char *&why)
 {
     float s[MOONHUT_TANK_SAMPLES];
-    uint8_t n = 0;
+    n = 0;
+    why = nullptr;
+    median = NAN;
+    spread = NAN;
 
     for (uint8_t i = 0; i < MOONHUT_TANK_SAMPLES; i++) {
-        const float m = pingOnce();
+        const float m = pingOnce(trigPin, echoPin);
         if (!isnan(m))
             s[n++] = m;
         // The datasheet asks for >60 ms between pings so the previous burst has
@@ -74,18 +85,9 @@ void MoonTankModule::measure()
         delay(60);
     }
 
-    bursts++;
     if (n == 0) {
-        timeouts++;
-        lastM = NAN;
-        lastSpreadM = NAN;
-        lastValid = 0;
-        LOG_WARN("MoonTank: no echo (%u of %u bursts have failed)", (unsigned)timeouts, (unsigned)bursts);
-        if (!diagnosed && timeouts >= 3) {
-            diagnosed = true; // once per boot - it is noisy and the answer does not change
-            diagnose();
-        }
-        return;
+        why = "no echo";
+        return false;
     }
 
     // Insertion sort - n is at most a handful.
@@ -99,19 +101,61 @@ void MoonTankModule::measure()
         s[j + 1] = k;
     }
 
-    const float median = s[n / 2];   // median, not mean: one wild echo must not move it
-    const float spread = s[n - 1] - s[0];
-    lastSpreadM = spread;
-    lastValid = n;
+    median = s[n / 2];        // median, not mean: one wild echo must not move it
+    spread = s[n - 1] - s[0];
 
     // Two gates, both learned the hard way on the fridge bus: a reading nobody
     // cross-checked, and a reading whose samples disagree, are both worse than no
     // reading at all - because they look exactly as confident as a good one.
-    reject = nullptr;
     if (n < MOONHUT_TANK_MIN_ECHOES)
-        reject = "too few echoes";
+        why = "too few echoes";
     else if (spread > MOONHUT_TANK_MAX_SPREAD_M)
-        reject = "samples disagree";
+        why = "samples disagree";
+    return why == nullptr;
+}
+
+void MoonTankModule::measure()
+{
+    float median = NAN, spread = NAN;
+    uint8_t n = 0;
+    const char *why = nullptr;
+    const bool ok = burst(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, median, spread, n, why);
+
+    bursts++;
+    lastSpreadM = spread;
+    lastValid = n;
+    reject = ok ? nullptr : why;
+
+#ifdef MOONHUT_TANK_DUAL
+    // Never overlap the two. This wait is longer than the echo timeout, so A's burst is
+    // fully dead before B speaks - see the header for why an overlap is worse than noise.
+    delay(MOONHUT_TANK_INTERLEAVE_MS);
+    const bool ok2 = burst(MOONHUT_TANK_TRIG_PIN2, MOONHUT_TANK_ECHO_PIN2, lastM2, lastSpread2, lastValid2, reject2);
+    if (!ok2)
+        lastM2 = NAN;
+
+    // Logged whatever either one did: a disagreement is as interesting as an agreement,
+    // and one sensor going silent where the other still reads is exactly the blind-zone
+    // answer the A/B exists to get.
+    const float aM = ok ? median : NAN;
+    if (!isnan(aM) && !isnan(lastM2))
+        LOG_INFO("MoonTank A/B: A %.3f m (sp %.3f, %u/%u)  B %.3f m (sp %.3f, %u/%u)  B-A %+.3f m", aM, spread, n,
+                 MOONHUT_TANK_SAMPLES, lastM2, lastSpread2, lastValid2, MOONHUT_TANK_SAMPLES, lastM2 - aM);
+    else
+        LOG_WARN("MoonTank A/B: A %s (%u/%u)  B %s (%u/%u)", ok ? "ok" : (why ? why : "?"), n, MOONHUT_TANK_SAMPLES,
+                 ok2 ? "ok" : (reject2 ? reject2 : "?"), lastValid2, MOONHUT_TANK_SAMPLES);
+#endif
+
+    if (n == 0) {
+        timeouts++;
+        lastM = NAN;
+        LOG_WARN("MoonTank: no echo (%u of %u bursts have failed)", (unsigned)timeouts, (unsigned)bursts);
+        if (!diagnosed && timeouts >= 3) {
+            diagnosed = true; // once per boot - it is noisy and the answer does not change
+            diagnose();
+        }
+        return;
+    }
 
     if (reject) {
         lastM = NAN;
@@ -162,9 +206,19 @@ void MoonTankModule::measure()
 //      stuck HIGH = miswired, or ECHO tied to something it should not be)
 //   3. Does ANY free pin see a pulse when we trigger? (finds a swapped TRIG/ECHO,
 //      or a pad whose silkscreen lies - which is exactly what happened on GPIO 47)
+#ifdef MOONHUT_TANK_DUAL
+#define IS_RANGER_B_PIN(p) ((p) == MOONHUT_TANK_TRIG_PIN2 || (p) == MOONHUT_TANK_ECHO_PIN2)
+#else
+#define IS_RANGER_B_PIN(p) (false)
+#endif
+
 void MoonTankModule::diagnose()
 {
     static const uint8_t candidates[] = {15, 16, 17, 40, 41, 42, 47, 48};
+
+    // Ranger B's pins are excluded below wherever this sweep re-modes a pin. Re-moding a
+    // pin that another sensor is using is exactly the mistake that made the fridge
+    // button read phantom presses - a diagnostic must not disturb working hardware.
 
     LOG_WARN("MoonTank: --- no echo after %u bursts, diagnosing ---", (unsigned)bursts);
 
@@ -193,7 +247,7 @@ void MoonTankModule::diagnose()
     // HIGH against a ~45k pulldown has something external driving it.
     LOG_INFO("MoonTank: --- idle levels (HIGH = driven externally) ---");
     for (uint8_t pin : candidates) {
-        if (pin == MOONHUT_TANK_TRIG_PIN)
+        if (pin == MOONHUT_TANK_TRIG_PIN || IS_RANGER_B_PIN(pin))
             continue;
         pinMode(pin, INPUT_PULLDOWN);
         delayMicroseconds(300);
@@ -207,7 +261,7 @@ void MoonTankModule::diagnose()
     // alive and wired anywhere we can see, this finds it and names the pin.
     LOG_INFO("MoonTank: --- pulse sweep: triggering, watching all free pins ---");
     for (uint8_t pin : candidates)
-        if (pin != MOONHUT_TANK_TRIG_PIN)
+        if (pin != MOONHUT_TANK_TRIG_PIN && !IS_RANGER_B_PIN(pin))
             pinMode(pin, INPUT);
 
     uint32_t rose[sizeof(candidates)] = {};
@@ -369,7 +423,7 @@ void MoonTankModule::report(bool force)
     if (!force && !due && !moved)
         return;
 
-    char line[160];
+    char line[224]; // room for ranger B's fields when the A/B rig is fitted
     if (isnan(lastM)) {
         snprintf(line, sizeof(line), "TANK|d=?|e=%u/%u|why=%s", lastValid, MOONHUT_TANK_SAMPLES,
                  reject ? reject : "no echo");
@@ -386,6 +440,20 @@ void MoonTankModule::report(bool force)
         snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|min=%.3f|max=%.3f|r=%s", lastM, lastSpreadM,
                  lastValid, MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM, r);
     }
+#ifdef MOONHUT_TANK_DUAL
+    // Ranger B rides along on A's report rather than triggering its own: the comparison
+    // is read afterwards from the log, and a second sensor must not double the mesh
+    // traffic that already had to be throttled once.
+    {
+        char b[64];
+        if (isnan(lastM2))
+            snprintf(b, sizeof(b), "|d2=?|e2=%u/%u", lastValid2, MOONHUT_TANK_SAMPLES);
+        else
+            snprintf(b, sizeof(b), "|d2=%.3f|sp2=%.3f|e2=%u/%u", lastM2, lastSpread2, lastValid2,
+                     MOONHUT_TANK_SAMPLES);
+        strncat(line, b, sizeof(line) - strlen(line) - 1);
+    }
+#endif
     sendLine(line);
 
     // Fast-drain alert, edge-triggered both ways so it cannot spam. Disabled unless a

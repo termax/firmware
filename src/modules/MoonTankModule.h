@@ -29,6 +29,33 @@
 #define MOONHUT_TANK_ECHO_PIN 16
 #endif
 
+// --- Second ranger, for the A/B bench ------------------------------------
+//
+// Optional: define BOTH pins to fit a second trigger/echo sensor alongside the first
+// and carry its reading in the same report, so two sensors can be compared on the same
+// board, the same water and the same minute.
+//
+// The second sensor is deliberately PASSIVE. It never feeds the level-rate fit, the
+// panel, the fast-drain alert or the report-triggering logic - it is a measurement
+// channel for deciding which sensor to keep, not a second source of truth. When the
+// winner is known, swap the primary pin defines to it and drop these.
+//
+// The JSN-SR04T goes on 47/48 because that is the pair the final V4 node has free, so
+// the firmware carries over to that board unchanged.
+#if defined(MOONHUT_TANK_TRIG_PIN2) && defined(MOONHUT_TANK_ECHO_PIN2)
+#define MOONHUT_TANK_DUAL 1
+#endif
+
+// Silence between the two bursts. MUST stay above ECHO_TIMEOUT_US so the first sensor's
+// ping is fully dead before the second speaks.
+//
+// Overlap does not present as noise, which is what makes it dangerous: each sensor hears
+// the OTHER's burst and reports the flight time to it - a short, stable, entirely
+// plausible distance that looks exactly like a real reading of a full tank.
+#ifndef MOONHUT_TANK_INTERLEAVE_MS
+#define MOONHUT_TANK_INTERLEAVE_MS 60
+#endif
+
 // Seconds between measurements.
 #ifndef MOONHUT_TANK_POLL_S
 #define MOONHUT_TANK_POLL_S 2
@@ -142,11 +169,25 @@ class MoonTankModule : public concurrency::OSThread
     float minM() const { return sessionMinM; }
     float maxM() const { return sessionMaxM; }
 
+#ifdef MOONHUT_TANK_DUAL
+    /// The comparison sensor's last filtered distance, NAN if its burst was rejected.
+    float distance2M() const { return lastM2; }
+    float spread2M() const { return lastSpread2; }
+    uint8_t validSamples2() const { return lastValid2; }
+    const char *rejectReason2() const { return reject2; }
+#endif
+
   protected:
     int32_t runOnce() override;
 
   private:
-    float pingOnce();  // one trigger/echo cycle, metres, NAN on timeout
+    float pingOnce(uint8_t trigPin, uint8_t echoPin); // one cycle, metres, NAN on timeout
+
+    /// One filtered burst on the given pins. Returns false and sets `why` when the
+    /// result should not be trusted; `median` is still set for the log unless nothing
+    /// answered at all.
+    bool burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n, const char *&why);
+
     void measure();
     void diagnose();   // runs after repeated silence: says WHY there is no echo
     void report(bool force);
@@ -175,6 +216,12 @@ class MoonTankModule : public concurrency::OSThread
     uint32_t timeouts = 0;
     bool diagnosed = false;
     const char *reject = nullptr;
+#ifdef MOONHUT_TANK_DUAL
+    float lastM2 = NAN;
+    float lastSpread2 = NAN;
+    uint8_t lastValid2 = 0;
+    const char *reject2 = nullptr;
+#endif
     float reportedM = NAN;
     float pendingM = NAN;          // a candidate change, not yet confirmed by a second reading
     float shownM = NAN;            // what the panel is currently displaying
