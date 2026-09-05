@@ -2,6 +2,7 @@
 
 #ifdef MOONHUT_TANK
 
+#include "FSCommon.h" // littlefs: the persisted tank calibration
 #include "MeshService.h"
 #include "PowerStatus.h"
 #include "configuration.h"
@@ -597,6 +598,13 @@ void MoonTankModule::serviceScreen(uint32_t now)
 
 int32_t MoonTankModule::runOnce()
 {
+    // Deliberately not in the constructor: modules are built before littlefs is mounted,
+    // which is the same trap the fridge roster hit.
+    if (!calLoaded) {
+        calLoaded = true;
+        loadCalibration();
+    }
+
     measure();
 
     // Announce a stall ONCE, edge-triggered, then say so again when it clears. A node
@@ -620,6 +628,130 @@ int32_t MoonTankModule::runOnce()
     report(false);
     serviceScreen(now);
     return MOONHUT_TANK_POLL_S * 1000;
+}
+
+
+// --- Calibration -----------------------------------------------------------
+
+float MoonTankModule::levelM() const
+{
+    if (!isCalibrated() || isnan(lastM))
+        return NAN;
+    // The sensor measures DOWN to the surface, so depth is height minus distance.
+    const float d = tankHeightM - lastM;
+    return d < 0.0f ? 0.0f : d;
+}
+
+float MoonTankModule::levelPct() const
+{
+    const float d = levelM();
+    if (isnan(d))
+        return NAN;
+    // Usable depth excludes the dead space at the top the sensor cannot see. Without
+    // that subtraction a "full" tank reads short of 100 % forever and everyone learns
+    // to distrust the number.
+    const float usable = tankHeightM - tankOffsetM;
+    if (usable <= 0.0f)
+        return NAN;
+    float pct = (d / usable) * 100.0f;
+    if (pct < 0.0f)
+        pct = 0.0f;
+    if (pct > 100.0f)
+        pct = 100.0f;
+    return pct;
+}
+
+void MoonTankModule::loadCalibration()
+{
+    auto f = FSCom.open(MOONHUT_TANK_CFG_PATH, FILE_O_READ);
+    if (!f)
+        return;
+    char buf[64] = {0};
+    size_t n = f.readBytes(buf, sizeof(buf) - 1);
+    f.close();
+    if (!n)
+        return;
+    float h = 0, o = 0;
+    if (sscanf(buf, "%f %f", &h, &o) >= 1) {
+        tankHeightM = h;
+        tankOffsetM = o;
+        LOG_INFO("MoonTank: calibration loaded - height %.3f m, dead top %.3f m", tankHeightM, tankOffsetM);
+    }
+}
+
+void MoonTankModule::saveCalibration()
+{
+    auto f = FSCom.open(MOONHUT_TANK_CFG_PATH, FILE_O_WRITE);
+    if (!f) {
+        LOG_ERROR("MoonTank: could not write %s", MOONHUT_TANK_CFG_PATH);
+        return;
+    }
+    char buf[48];
+    int n = snprintf(buf, sizeof(buf), "%.4f %.4f", tankHeightM, tankOffsetM);
+    f.write((const uint8_t *)buf, n);
+    f.close();
+    LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m", tankHeightM, tankOffsetM);
+}
+
+bool MoonTankModule::acceptsCommand(uint8_t channelIndex, bool pkiEncrypted) const
+{
+    // Same rule as the fridge: the fleet channel, or a PKI DM. Not the default channel,
+    // where anything within earshot could recalibrate a tank.
+    if (pkiEncrypted)
+        return true;
+    const char *name = channels.getGlobalId(channelIndex);
+    return name && strcasecmp(name, MOONHUT_TANK_CHANNEL) == 0;
+}
+
+const char *MoonTankModule::handleCommand(const char *body)
+{
+    static char reply[160];
+    while (*body == ' ')
+        body++;
+
+    if (strncasecmp(body, "height=", 7) == 0) {
+        const float v = atof(body + 7);
+        if (v <= 0.0f || v > 10.0f) {
+            snprintf(reply, sizeof(reply), "tank: height must be 0-10 m, got %.3f", (double)v);
+            return reply;
+        }
+        tankHeightM = v;
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: height=%.3f m, dead top=%.3f m -> usable %.3f m", (double)tankHeightM,
+                 (double)tankOffsetM, (double)(tankHeightM - tankOffsetM));
+        return reply;
+    }
+    if (strncasecmp(body, "offset=", 7) == 0) {
+        const float v = atof(body + 7);
+        if (v < 0.0f || v >= tankHeightM) {
+            snprintf(reply, sizeof(reply), "tank: offset must be 0..height (%.3f)", (double)tankHeightM);
+            return reply;
+        }
+        tankOffsetM = v;
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: dead top=%.3f m -> usable %.3f m", (double)tankOffsetM,
+                 (double)(tankHeightM - tankOffsetM));
+        return reply;
+    }
+    if (strncasecmp(body, "clear", 5) == 0) {
+        tankHeightM = 0.0f;
+        tankOffsetM = 0.0f;
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: calibration cleared - showing distance only");
+        return reply;
+    }
+    if (strncasecmp(body, "show", 4) == 0) {
+        if (!isCalibrated()) {
+            snprintf(reply, sizeof(reply), "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m", (double)lastM);
+            return reply;
+        }
+        snprintf(reply, sizeof(reply), "tank: height=%.3f dead=%.3f usable=%.3f d=%.3f level=%.3f %.0f%%",
+                 (double)tankHeightM, (double)tankOffsetM, (double)(tankHeightM - tankOffsetM), (double)lastM,
+                 (double)levelM(), (double)levelPct());
+        return reply;
+    }
+    snprintf(reply, sizeof(reply), "tank: unknown command. try height=<m>, offset=<m>, show, clear");
+    return reply;
 }
 
 #endif // MOONHUT_TANK

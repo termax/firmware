@@ -328,6 +328,13 @@ void InputBroker::Init()
         userConfig.longPress = INPUT_BROKER_SELECT;
         userConfig.longPressTime = 500;
         userConfig.longLongPress = INPUT_BROKER_SHUTDOWN;
+#if defined(MOONHUT_TANK_ONLY) || defined(MOONHUT_FRIDGE_ONLY)
+        // A boxed appliance at a tank or a fridge: PRG is a real control people press to
+        // change frames, so the shutdown hold has to be far away from an ordinary press.
+        // 3.9 s is close enough to a firm press to switch the node off by accident, and
+        // recovering one means a trip out to it. 15 s matches the no-screen path below.
+        userConfig.longLongPressTime = 15 * 1000;
+#endif
         UserButtonThread->initButton(userConfig);
     } else
 #endif

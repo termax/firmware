@@ -1,6 +1,9 @@
 #include "TextMessageModule.h"
 #include "Channels.h"
 #include "MeshService.h"
+#ifdef MOONHUT_TANK
+#include "modules/MoonTankModule.h"
+#endif
 #include "gps/RTC.h"
 #include "MessageStore.h"
 #include "NodeDB.h"
@@ -69,6 +72,46 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
             // Ask for an ack so the router retries. A command reply is a one-shot answer
             // to a question somebody asked - losing it silently leaves an API caller
             // waiting forever, which is exactly what happened on the second live test.
+            reply->want_ack = true;
+            reply->decoded.payload.size =
+                snprintf((char *)reply->decoded.payload.bytes, sizeof(reply->decoded.payload.bytes), "%s", result);
+            service->sendToMesh(reply, RX_SRC_LOCAL, false);
+        }
+        return ProcessMessage::STOP;
+    }
+#endif
+#ifdef MOONHUT_TANK
+    // "tank:<command>" - calibration, so the node can show a percentage on its own panel.
+    // Handled here for the same reason as fridge:, ahead of every screen path.
+    if (moonTankModule && mp.decoded.payload.size > 5 &&
+        strncasecmp((const char *)mp.decoded.payload.bytes, "tank:", 5) == 0) {
+        char body[160];
+        size_t n = mp.decoded.payload.size - 5;
+        if (n >= sizeof(body))
+            n = sizeof(body) - 1;
+        memcpy(body, mp.decoded.payload.bytes + 5, n);
+        body[n] = 0;
+
+        if (!moonTankModule->acceptsCommand(mp.channel, mp.pki_encrypted)) {
+            LOG_WARN("MoonTank: ignored a tank: command on channel %u", mp.channel);
+            if (mp.from) {
+                meshtastic_MeshPacket *nack = allocDataPacket();
+                nack->to = mp.from;
+                nack->channel = mp.channel;
+                nack->want_ack = false;
+                nack->decoded.payload.size =
+                    snprintf((char *)nack->decoded.payload.bytes, sizeof(nack->decoded.payload.bytes),
+                             "command ignored: wrong channel (use the fleet channel, or a PKI DM)");
+                service->sendToMesh(nack, RX_SRC_LOCAL, false);
+            }
+            return ProcessMessage::STOP;
+        }
+
+        const char *result = moonTankModule->handleCommand(body);
+        if (mp.from) {
+            meshtastic_MeshPacket *reply = allocDataPacket();
+            reply->to = mp.from;
+            reply->channel = mp.channel;
             reply->want_ack = true;
             reply->decoded.payload.size =
                 snprintf((char *)reply->decoded.payload.bytes, sizeof(reply->decoded.payload.bytes), "%s", result);

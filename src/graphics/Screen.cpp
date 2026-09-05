@@ -1151,7 +1151,12 @@ void Screen::setFrames(FrameFocus focus)
     // Proof-of-concept appliance: the ranger frame and nothing else, for the same
     // reason the fridge build strips the carousel - there is nowhere to get lost.
     {
+        // TWO frames, so the stock carousel gives PRG something to do: LEVEL for whoever
+        // is standing at the tank, SENSOR for whoever is deciding whether to trust it.
+        // Deliberately not a custom button handler - the sign frame swallowing PRG on
+        // MVT1 is exactly what custom press handling costs when it goes wrong.
         uint8_t nf = 0;
+        normalFrames[nf++] = graphics::TankRenderer::drawLevelFrame;
         normalFrames[nf++] = graphics::TankRenderer::drawTankFrame;
         fsi.frameCount = nf;
         this->frameCount = nf;

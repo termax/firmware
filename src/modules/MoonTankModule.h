@@ -188,6 +188,25 @@
 #define MOONHUT_TANK_STALL_S 600
 #endif
 
+// --- Calibration -----------------------------------------------------------
+//
+// The node needs a tank height locally to show a percentage on its own panel, which is
+// the whole point of having a panel at the tank. It is deliberately RUNTIME-SETTABLE and
+// persisted, never a build flag: re-plumbing a tank must be a command, not a reflash.
+//
+// This does NOT make the node the system of record. The Pi still owns litres, history
+// and alerting from the raw distance; the percentage here is a convenience readout for
+// whoever is standing in front of the box. Two consumers of one geometry, deliberately -
+// so if they ever disagree, the Pi wins.
+//
+//   tank:height=3.20    metres from the sensor face to the tank floor
+//   tank:offset=0.35    optional dead space at the top the sensor cannot see
+//   tank:show           report the current calibration
+//   tank:clear          forget it and go back to showing distance only
+#ifndef MOONHUT_TANK_CFG_PATH
+#define MOONHUT_TANK_CFG_PATH "/tankcfg"
+#endif
+
 class MoonTankModule : public concurrency::OSThread
 {
   public:
@@ -210,6 +229,27 @@ class MoonTankModule : public concurrency::OSThread
     /// Session min/max, for the bench range test.
     float minM() const { return sessionMinM; }
     float maxM() const { return sessionMaxM; }
+
+    /// True once a tank height has been set. Until then the panel shows distance only
+    /// and says so, rather than inventing a percentage from a guessed height.
+    bool isCalibrated() const { return tankHeightM > 0.0f; }
+    float tankHeight() const { return tankHeightM; }
+    float deadTopM() const { return tankOffsetM; }
+
+    /// Water depth in metres, NAN if uncalibrated or the last burst failed.
+    float levelM() const;
+    /// Fill percentage 0-100, NAN if uncalibrated or the last burst failed.
+    float levelPct() const;
+    /// Level change rate, metres/hour: + filling, - draining. NAN until the fit has span.
+    float levelRateMphPublic() const { return levelRateMph(); }
+
+    /// "tank:<command>" surface. Returns a short human-readable result to DM back.
+    const char *handleCommand(const char *body);
+    /// Commands are honoured on the fleet channel or a PKI DM, same rule as the fridge.
+    bool acceptsCommand(uint8_t channelIndex, bool pkiEncrypted) const;
+
+    void loadCalibration();
+    void saveCalibration();
 
 #ifdef MOONHUT_TANK_DUAL
     /// The comparison sensor's last filtered distance, NAN if its burst was rejected.
@@ -249,6 +289,10 @@ class MoonTankModule : public concurrency::OSThread
     uint8_t rateHead = 0;
     uint32_t lastRateAt = 0;
     bool drainAlarm = false;
+
+    bool calLoaded = false;     // littlefs is not mounted when modules are constructed
+    float tankHeightM = 0.0f;   // 0 = uncalibrated
+    float tankOffsetM = 0.0f;   // dead space at the top, subtracted from usable depth
 
     float lastM = NAN;
     float lastSpreadM = NAN;
