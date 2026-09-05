@@ -128,6 +128,7 @@ void MoonTankModule::measure()
     const bool ok = burst(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, median, spread, n, why, trigUs);
 
     bursts++;
+    lastRawM = median;   // kept even when rejected - see the header
 #ifdef MOONHUT_TANK_TRIG_SWEEP
     LOG_WARN("MoonTank SWEEP: trigger %u us -> %s (%u/%u echoes)", (unsigned)trigUs,
              ok ? "ECHO" : (why ? why : "?"), n, MOONHUT_TANK_SAMPLES);
@@ -159,6 +160,7 @@ void MoonTankModule::measure()
     if (n == 0) {
         timeouts++;
         lastM = NAN;
+        consecFails++;
         LOG_WARN("MoonTank: no echo (%u of %u bursts have failed)", (unsigned)timeouts, (unsigned)bursts);
         if (!diagnosed && timeouts >= 3) {
             diagnosed = true; // once per boot - it is noisy and the answer does not change
@@ -169,12 +171,21 @@ void MoonTankModule::measure()
 
     if (reject) {
         lastM = NAN;
+        consecFails++;
         LOG_WARN("MoonTank: REJECTED %.3f m - %s (spread %.3f m, %u/%u echoes)", median, reject, spread, n,
                  MOONHUT_TANK_SAMPLES);
         return;
     }
 
     lastM = median;
+    consecFails = 0;
+    lastGoodAtMs = millis();
+    if (stallAnnounced) {
+        stallAnnounced = false;
+        char ok[96];
+        snprintf(ok, sizeof(ok), "TANK OK|reading again|d=%.3f|up=%lus", lastM, (unsigned long)(millis() / 1000));
+        sendLine(ok);
+    }
 
     recordLevel(millis(), lastM);
 
@@ -435,8 +446,17 @@ void MoonTankModule::report(bool force)
 
     char line[224]; // room for ranger B's fields when the A/B rig is fitted
     if (isnan(lastM)) {
-        snprintf(line, sizeof(line), "TANK|d=?|e=%u/%u|why=%s", lastValid, MOONHUT_TANK_SAMPLES,
-                 reject ? reject : "no echo");
+        // Carry the rejected median and its spread. "d=?" alone says something is wrong;
+        // raw= and sp= say WHAT, which is the difference between diagnosing a boxed node
+        // from the mesh and driving out to it with a laptop.
+        char raw[24];
+        if (isnan(lastRawM))
+            snprintf(raw, sizeof(raw), "?");
+        else
+            snprintf(raw, sizeof(raw), "%.3f", (double)lastRawM);
+        snprintf(line, sizeof(line), "TANK|d=?|raw=%s|sp=%.3f|e=%u/%u|why=%s|fails=%lu|up=%lus", raw,
+                 (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, reject ? reject : "no echo",
+                 (unsigned long)consecFails, (unsigned long)(millis() / 1000));
     } else {
         // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a
         // long enough window - an unknown rate is said out loud rather than sent as 0.000,
@@ -447,8 +467,9 @@ void MoonTankModule::report(bool force)
             snprintf(r, sizeof(r), "?");
         else
             snprintf(r, sizeof(r), "%+.3f", (double)rate);
-        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|min=%.3f|max=%.3f|r=%s", lastM, lastSpreadM,
-                 lastValid, MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM, r);
+        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|min=%.3f|max=%.3f|r=%s|up=%lus", lastM,
+                 lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM, r,
+                 (unsigned long)(millis() / 1000));
     }
 #ifdef MOONHUT_TANK_DUAL
     // Ranger B rides along on A's report rather than triggering its own: the comparison
@@ -577,8 +598,27 @@ void MoonTankModule::serviceScreen(uint32_t now)
 int32_t MoonTankModule::runOnce()
 {
     measure();
+
+    // Announce a stall ONCE, edge-triggered, then say so again when it clears. A node
+    // that simply stops reporting a distance is indistinguishable from a node that has
+    // gone off the air; this makes "the sensor is not giving me a number" an event the
+    // mesh can see rather than an absence somebody has to notice.
+    //
+    // lastGoodAtMs is 0 until the first good reading, so a node that has NEVER read is
+    // measured from boot and alerts on the same timer.
+    const uint32_t now = millis();
+    if (!stallAnnounced && (now - lastGoodAtMs) > (MOONHUT_TANK_STALL_S * 1000UL)) {
+        stallAnnounced = true;
+        char a[176];
+        snprintf(a, sizeof(a), "TANK STALL|no valid reading for %lus|fails=%lu|raw=%.3f|sp=%.3f|why=%s|up=%lus",
+                 (unsigned long)((now - lastGoodAtMs) / 1000), (unsigned long)consecFails, (double)lastRawM,
+                 (double)lastSpreadM, reject ? reject : "no echo", (unsigned long)(now / 1000));
+        sendLine(a);
+        LOG_ERROR("MoonTank: STALLED - %lu consecutive failures", (unsigned long)consecFails);
+    }
+
     report(false);
-    serviceScreen(millis());
+    serviceScreen(now);
     return MOONHUT_TANK_POLL_S * 1000;
 }
 

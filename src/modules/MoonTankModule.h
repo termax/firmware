@@ -174,6 +174,20 @@
 #define MOONHUT_TANK_REPORT_S 60
 #endif
 
+// --- Stall detection -------------------------------------------------------
+//
+// A node in an enclosure at a tank has no serial cable, so "it stopped showing a
+// distance" has to be diagnosable from the mesh alone. Two things make that possible:
+// every report carries uptime and the consecutive-failure count, and a run of failures
+// long enough to matter announces itself instead of going quiet.
+//
+// The distinction that matters in the log: a node that REBOOTED comes back with a small
+// uptime, a node that STALLED keeps counting up. Without uptime in the line the two are
+// indistinguishable after the fact, which is exactly the hole this closes.
+#ifndef MOONHUT_TANK_STALL_S
+#define MOONHUT_TANK_STALL_S 600
+#endif
+
 class MoonTankModule : public concurrency::OSThread
 {
   public:
@@ -238,6 +252,12 @@ class MoonTankModule : public concurrency::OSThread
 
     float lastM = NAN;
     float lastSpreadM = NAN;
+    // What the last burst actually saw, kept even when the gates rejected it. Throwing
+    // the number away is what made a rejected reading undiagnosable from the mesh.
+    float lastRawM = NAN;
+    uint32_t consecFails = 0;
+    uint32_t lastGoodAtMs = 0;
+    bool stallAnnounced = false;
     uint8_t lastValid = 0;
     float sessionMinM = NAN;
     float sessionMaxM = NAN;
