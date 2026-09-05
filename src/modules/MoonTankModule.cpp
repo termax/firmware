@@ -46,14 +46,14 @@ MoonTankModule::MoonTankModule() : concurrency::OSThread("MoonTank")
 #endif
 }
 
-float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin)
+float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs)
 {
     // 10 us trigger, per the datasheet. The 2 us LOW first guarantees a clean edge
     // even if something left the line high.
     digitalWrite(trigPin, LOW);
     delayMicroseconds(2);
     digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
+    delayMicroseconds(trigUs);
     digitalWrite(trigPin, LOW);
 
     const uint32_t us = pulseIn(echoPin, HIGH, ECHO_TIMEOUT_US);
@@ -68,7 +68,7 @@ float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin)
 }
 
 bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n,
-                           const char *&why)
+                           const char *&why, uint16_t trigUs)
 {
     float s[MOONHUT_TANK_SAMPLES];
     n = 0;
@@ -77,12 +77,12 @@ bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, floa
     spread = NAN;
 
     for (uint8_t i = 0; i < MOONHUT_TANK_SAMPLES; i++) {
-        const float m = pingOnce(trigPin, echoPin);
+        const float m = pingOnce(trigPin, echoPin, trigUs);
         if (!isnan(m))
             s[n++] = m;
         // The datasheet asks for >60 ms between pings so the previous burst has
         // died away; less and you measure your own echo coming back off the tank.
-        delay(60);
+        delay(MOONHUT_TANK_PING_GAP_MS);
     }
 
     if (n == 0) {
@@ -119,9 +119,19 @@ void MoonTankModule::measure()
     float median = NAN, spread = NAN;
     uint8_t n = 0;
     const char *why = nullptr;
-    const bool ok = burst(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, median, spread, n, why);
+#ifdef MOONHUT_TANK_TRIG_SWEEP
+    static const uint16_t widths[] = MOONHUT_TANK_TRIG_WIDTHS;
+    const uint16_t trigUs = widths[bursts % (sizeof(widths) / sizeof(widths[0]))];
+#else
+    const uint16_t trigUs = MOONHUT_TANK_TRIG_US;
+#endif
+    const bool ok = burst(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, median, spread, n, why, trigUs);
 
     bursts++;
+#ifdef MOONHUT_TANK_TRIG_SWEEP
+    LOG_WARN("MoonTank SWEEP: trigger %u us -> %s (%u/%u echoes)", (unsigned)trigUs,
+             ok ? "ECHO" : (why ? why : "?"), n, MOONHUT_TANK_SAMPLES);
+#endif
     lastSpreadM = spread;
     lastValid = n;
     reject = ok ? nullptr : why;

@@ -56,6 +56,34 @@
 #define MOONHUT_TANK_INTERLEAVE_MS 60
 #endif
 
+// Width of the trigger pulse, microseconds.
+//
+// 50, not the 10 every HC-SR04 example uses. MEASURED on a JSN-SR04T with the sweep
+// build on 2026-09-05: 10 us NEVER produced an echo (0/5 on every attempt), 20 us was
+// marginal (one burst rejected at 0.706 m spread, the next clean), and 30 us and above
+// were solid 5/5 at 2.116 m with a spread of 0-9 mm.
+//
+// The JSN has its own MCU sampling that line and simply ignores a pulse it does not
+// latch - no error, no echo, indistinguishable from a dead sensor or a wiring fault.
+// That cost most of an evening: the sensor was alive and correctly wired the whole time.
+//
+// 50 satisfies the HC-SR04 datasheet too (it asks for 10 us MINIMUM), so one value
+// drives both parts, and it is nothing against the settling gap below.
+#ifndef MOONHUT_TANK_TRIG_US
+#define MOONHUT_TANK_TRIG_US 50
+#endif
+
+// Quiet time after each ping so the previous burst has died away.
+#ifndef MOONHUT_TANK_PING_GAP_MS
+#define MOONHUT_TANK_PING_GAP_MS 60
+#endif
+
+// DIAGNOSTIC: cycle the trigger width across bursts and log which one the sensor
+// answers. One flash instead of four, and it names the working width outright.
+#ifdef MOONHUT_TANK_TRIG_SWEEP
+#define MOONHUT_TANK_TRIG_WIDTHS {10, 20, 30, 50, 100, 200}
+#endif
+
 // Seconds between measurements.
 #ifndef MOONHUT_TANK_POLL_S
 #define MOONHUT_TANK_POLL_S 2
@@ -181,12 +209,13 @@ class MoonTankModule : public concurrency::OSThread
     int32_t runOnce() override;
 
   private:
-    float pingOnce(uint8_t trigPin, uint8_t echoPin); // one cycle, metres, NAN on timeout
+    float pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs); // one cycle, metres, NAN on timeout
 
     /// One filtered burst on the given pins. Returns false and sets `why` when the
     /// result should not be trusted; `median` is still set for the log unless nothing
     /// answered at all.
-    bool burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n, const char *&why);
+    bool burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n, const char *&why,
+               uint16_t trigUs = MOONHUT_TANK_TRIG_US);
 
     void measure();
     void diagnose();   // runs after repeated silence: says WHY there is no echo
