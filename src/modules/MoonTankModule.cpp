@@ -28,11 +28,11 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // 50 us trigger is MEASURED: 10 us produced 0/5 echoes every time, 20 was marginal.
     // The 0.30 m floor is the RINGDOWN artifact - a rock-steady 0.23-0.25 m from this
     // part is the transducer still ringing, not a real short-range measurement.
-    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, "JSN-SR04T V3.3 waterproof, transducer on board"},
+    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, "JSN-SR04T V3.3 waterproof, transducer on board"},
 
     // HC-SR04P, the 3.3 V twin-transducer bench yardstick. Same interface and timing as
     // the JSN; NOT waterproof, so bench reference only, never a tank.
-    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
+    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
 
     // DYP A02 in PWM mode - waterproof bistatic probe, IP67, 3.3-5 V.
     // THREE things differ from the JSN and all three matter:
@@ -51,7 +51,7 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // echoes" - the remaining four land inside its recovery window and return nothing.
     // The datasheet's ">70 ms period" is a floor for the trigger, not what the module
     // needs to be ready again. Five pings now cost 1.25 s inside a 3 s poll.
-    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
+    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, 5000, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
 };
 const uint8_t MOONHUT_TANK_SENSOR_COUNT = sizeof(MOONHUT_TANK_SENSORS) / sizeof(MOONHUT_TANK_SENSORS[0]);
 
@@ -118,18 +118,38 @@ float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs
 
     const MoonTankSensor *sn = activeSensor();
 
+    // BLANKING. pulseIn() starts listening the instant the trigger fires, and the trigger
+    // pin is adjacent to the echo pin - so it latches the few microseconds of crosstalk
+    // from its own edge, times THAT, and returns. The ping is consumed and the real echo
+    // arriving 11 ms later is never seen.
+    //
+    // MEASURED on the A02 2026-09-06: 12 runts of 1-12 us and 12 timeouts against a
+    // single good 8766 us read, i.e. the "1 of 5 echoes" that survived a ping-gap change
+    // and a trigger-polarity change because neither was the cause.
+    //
+    // Per-sensor, because a JSN legitimately answers in ~500 us and must not be deafened.
+    // The A02 cannot reply before T1 = 10 ms, so 5 ms of deafness costs it nothing.
+    if (sn->echoBlankUs)
+        delayMicroseconds(sn->echoBlankUs);
+
     const uint32_t us = pulseIn(echoPin, HIGH, sn->echoTimeoutUs);
-    if (us == 0)
-        return NAN; // no echo inside the window
 
-    // Some parts answer "nothing out there" with a FIXED pulse width rather than
-    // silence. Believed literally that is a confident, plausible long distance - on a
-    // tank, a confident report of "empty". Treat it as no reading.
-    if (sn->deadPulseUs && us > sn->deadPulseUs - 2000 && us < sn->deadPulseUs + 2000)
-        return NAN;
-
-    // Out and back, so half the flight time.
+    // Every path below returns NAN, and they mean COMPLETELY different things: a silent
+    // sensor, a sensor explicitly saying "nothing there", and a sensor reading outside
+    // the tank. Collapsing them into one NAN is why "1 of 5 echoes" was unreadable -
+    // it could equally have been a wiring fault, bad aim, or a filter set too tight.
+    // One line per ping settles it, and a burst is only five of them every few seconds.
     const float m = (us * 1e-6f * sn->speedMs) / 2.0f;
+    const bool sentinel = sn->deadPulseUs && us > sn->deadPulseUs - 2000 && us < sn->deadPulseUs + 2000;
+    const char *verdict = us == 0            ? "TIMEOUT - no pulse at all"
+                          : sentinel         ? "NO TARGET - sensor's fixed no-echo pulse"
+                          : m < sn->minValidM ? "too near (under the profile floor)"
+                          : m > sn->maxValidM ? "too far (over the profile ceiling)"
+                                              : "ok";
+    LOG_DEBUG("MoonTank ping: raw %u us -> %.3f m : %s", (unsigned)us, (double)m, verdict);
+
+    if (us == 0 || sentinel)
+        return NAN;
     if (m < sn->minValidM || m > sn->maxValidM)
         return NAN;
     return m;

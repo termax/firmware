@@ -103,6 +103,7 @@ struct MoonTankSensor {
     uint32_t deadPulseUs;    // 0 = none; a fixed width some parts emit to mean "no target"
     uint16_t pingGapMs;      // quiet time the part needs between triggers to answer again
     bool trigActiveLow;      // true = line IDLES HIGH and the trigger is a dip to LOW
+    uint16_t echoBlankUs;    // deafen this long after the trigger; 0 = listen immediately
     const char *desc;
 };
 
