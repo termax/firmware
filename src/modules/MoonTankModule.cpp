@@ -291,6 +291,10 @@ void MoonTankModule::measure()
     }
 
     lastM = median;
+    // How long the sensor was quiet BEFORE this reading, captured before lastGoodAtMs is
+    // overwritten. The cross-burst ring uses it to decide whether its contents are still
+    // about the same water.
+    const uint32_t gapMs = lastGoodAtMs ? (millis() - lastGoodAtMs) : 0;
     consecFails = 0;
     lastGoodAtMs = millis();
     if (stallAnnounced) {
@@ -300,6 +304,17 @@ void MoonTankModule::measure()
         sendLine(ok);
     }
 
+    // A gap long enough to count as a stall means the ring is holding readings from
+    // BEFORE it. Their median would be a distance from another era, and recordLevel would
+    // stamp it with a fresh timestamp - an old level at a new time is a fabricated rate,
+    // which is worse than no rate. Start the window again instead.
+    if (gapMs > (MOONHUT_TANK_STALL_S * 1000UL) && stableCount) {
+        LOG_INFO("MoonTank: %lus gap - discarding %u stale burst(s) from the rate window",
+                 (unsigned long)(gapMs / 1000), (unsigned)stableCount);
+        stableCount = 0;
+        stableHead = 0;
+    }
+    pushBurst(lastM);
     recordLevel(millis(), lastM);
 
     if (isnan(sessionMinM) || lastM < sessionMinM)
@@ -505,6 +520,40 @@ void MoonTankModule::sendLine(const char *text)
     LOG_INFO("MoonTank: sent %s", text);
 }
 
+// Every accepted burst median goes in the ring, whether or not the fit wants a sample
+// this minute - the ring has to be full of RECENT bursts at the moment the decimation
+// boundary arrives, or the median is computed over stale readings.
+void MoonTankModule::pushBurst(float metres)
+{
+    if (isnan(metres))
+        return;
+    stableBuf[stableHead] = metres;
+    stableHead = (uint8_t)((stableHead + 1) % MOONHUT_TANK_STABLE_WINDOW);
+    if (stableCount < MOONHUT_TANK_STABLE_WINDOW)
+        stableCount++;
+}
+
+// Median of the ring. NAN until it is FULL: a median over two samples is just their mean
+// and gives none of the protection this exists for, so the fit waits rather than being
+// fed something weaker than it thinks it is getting.
+float MoonTankModule::stableM() const
+{
+    if (stableCount < MOONHUT_TANK_STABLE_WINDOW)
+        return NAN;
+    float v[MOONHUT_TANK_STABLE_WINDOW];
+    memcpy(v, stableBuf, sizeof(v));
+    for (uint8_t i = 1; i < MOONHUT_TANK_STABLE_WINDOW; i++) {
+        const float k = v[i];
+        int8_t j = (int8_t)i - 1;
+        while (j >= 0 && v[j] > k) {
+            v[j + 1] = v[j];
+            j--;
+        }
+        v[j + 1] = k;
+    }
+    return v[MOONHUT_TANK_STABLE_WINDOW / 2];
+}
+
 // Keep one sample a minute at most. Polling is every 2 s for a live panel, but a rate fit
 // wants spread-out points: 16 samples two seconds apart span 30 s and would measure noise.
 void MoonTankModule::recordLevel(uint32_t now, float metres)
@@ -513,6 +562,19 @@ void MoonTankModule::recordLevel(uint32_t now, float metres)
         return; // never let a rejected reading into the fit
     if (rateCount && (now - lastRateAt) < (MOONHUT_TANK_RATE_DECIMATE_S * 1000UL))
         return;
+
+    // The CROSS-BURST median, not the burst that happened to land on this boundary. A
+    // single object crossing the beam yields five agreeing pings that the in-burst filter
+    // accepts, and decimation would otherwise copy that straight into the fit. NAN while
+    // the ring fills, which just means the fit starts a few bursts later.
+    const float stable = stableM();
+    if (isnan(stable))
+        return;
+    if (fabsf(stable - metres) > MOONHUT_TANK_AGREE_M)
+        LOG_INFO("MoonTank: rate fed %.3f m (cross-burst median), not this burst's %.3f m", (double)stable,
+                 (double)metres);
+    metres = stable;
+
     lastRateAt = now;
     rateBuf[rateHead] = {now, metres};
     rateHead = (uint8_t)((rateHead + 1) % MOONHUT_TANK_RATE_SAMPLES);

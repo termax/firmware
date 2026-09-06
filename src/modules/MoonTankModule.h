@@ -213,6 +213,29 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_RATE_MIN_SPAN_S 300 // 5 min
 #endif
 
+// --- Cross-burst median ----------------------------------------------------
+//
+// The consensus filter inside a burst checks that the five pings AGREE. It cannot tell
+// agreement from truth: an object crossing the beam gives five pings that agree
+// perfectly on the wrong answer.
+//
+// MEASURED 2026-09-06, MoonTank1, 82-burst soak on a static target: 81 bursts at
+// 2.104-2.111 m and ONE burst at 1.246 m with a 1 mm spread - something crossed the beam
+// for ~3 s. That burst is exactly the shape the filter is built to TRUST. On a tank, a
+// bird, a leaf, a hand or a rat produces a confident, tight-spread, wrong level.
+//
+// Only comparing ACROSS bursts can catch it, so the rate fit is fed the median of the
+// last few burst medians rather than whichever burst happened to land on the decimation
+// boundary. An odd window so the median is a real sample; 5 bursts is ~18 s at a 3.5 s
+// cadence, and a transient has to dominate 3 of 5 to move the answer.
+//
+// The PANEL and the reported distance deliberately keep the INSTANTANEOUS value - a
+// display at the tank should react to what is in front of it right now. It is the rate
+// fit and the alert built on it that must not.
+#ifndef MOONHUT_TANK_STABLE_WINDOW
+#define MOONHUT_TANK_STABLE_WINDOW 5
+#endif
+
 // Fast-drain alert. DISABLED by default (0) and it should stay that way until this tank's
 // normal draw has been observed: a threshold guessed before the first day of real data is
 // just a source of false alarms, and an alert nobody trusts is worse than no alert.
@@ -348,6 +371,14 @@ class MoonTankModule : public concurrency::OSThread
     void serviceScreen(uint32_t now);
     void sendLine(const char *text);
     void recordLevel(uint32_t now, float metres);
+
+    // Ring of recent accepted burst medians, and their median. See the note above: this
+    // is what defends the rate fit from a single beam-crossing burst.
+    void pushBurst(float metres);
+    float stableM() const; // median of the ring, NAN until it has filled
+    float stableBuf[MOONHUT_TANK_STABLE_WINDOW] = {};
+    uint8_t stableCount = 0;
+    uint8_t stableHead = 0;
     float levelRateMph() const; // metres/hour, + = filling, NAN if not enough span
 
     // Ring of decimated (time, distance) samples, for the least-squares rate fit.
