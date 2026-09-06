@@ -705,6 +705,14 @@ int32_t MoonTankModule::runOnce()
     if (!calLoaded) {
         calLoaded = true;
         loadCalibration();
+        // OUTSIDE loadCalibration(), which returns early when there is no file yet - and a
+        // node that has never been calibrated is exactly the one where you most need to be
+        // told which sensor profile it is using.
+        const MoonTankSensor *sn = activeSensor();
+        LOG_INFO("MoonTank: sensor profile '%s' - %s", sn->name, sn->desc);
+        LOG_INFO("MoonTank: trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m, dead pulse %u us",
+                 (unsigned)sn->trigUs, (unsigned)(sn->echoTimeoutUs / 1000), (double)sn->speedMs,
+                 (double)sn->minValidM, (double)sn->maxValidM, (unsigned)sn->deadPulseUs);
     }
 
 #ifdef MOONHUT_TANK_TRIG_SWEEP
@@ -838,10 +846,6 @@ void MoonTankModule::loadCalibration()
                      activeSensor()->name);
         }
     }
-    LOG_INFO("MoonTank: sensor profile '%s' - %s (trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m)",
-             activeSensor()->name, activeSensor()->desc, (unsigned)activeSensor()->trigUs,
-             (unsigned)(activeSensor()->echoTimeoutUs / 1000), (double)activeSensor()->speedMs,
-             (double)activeSensor()->minValidM, (double)activeSensor()->maxValidM);
 }
 
 void MoonTankModule::saveCalibration()
