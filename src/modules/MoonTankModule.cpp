@@ -28,11 +28,11 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // 50 us trigger is MEASURED: 10 us produced 0/5 echoes every time, 20 was marginal.
     // The 0.30 m floor is the RINGDOWN artifact - a rock-steady 0.23-0.25 m from this
     // part is the transducer still ringing, not a real short-range measurement.
-    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, "JSN-SR04T V3.3 waterproof, transducer on board"},
+    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, "JSN-SR04T V3.3 waterproof, transducer on board"},
 
     // HC-SR04P, the 3.3 V twin-transducer bench yardstick. Same interface and timing as
     // the JSN; NOT waterproof, so bench reference only, never a tank.
-    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
+    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
 
     // DYP A02 in PWM mode - waterproof bistatic probe, IP67, 3.3-5 V.
     // THREE things differ from the JSN and all three matter:
@@ -51,7 +51,7 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // echoes" - the remaining four land inside its recovery window and return nothing.
     // The datasheet's ">70 ms period" is a floor for the trigger, not what the module
     // needs to be ready again. Five pings now cost 1.25 s inside a 3 s poll.
-    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
+    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
 };
 const uint8_t MOONHUT_TANK_SENSOR_COUNT = sizeof(MOONHUT_TANK_SENSORS) / sizeof(MOONHUT_TANK_SENSORS[0]);
 
@@ -98,13 +98,23 @@ MoonTankModule::MoonTankModule() : concurrency::OSThread("MoonTank")
 
 float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs)
 {
-    // 10 us trigger, per the datasheet. The 2 us LOW first guarantees a clean edge
-    // even if something left the line high.
-    digitalWrite(trigPin, LOW);
+    const MoonTankSensor *sn0 = activeSensor();
+
+    // POLARITY IS PER-SENSOR. An HC-SR04/JSN idles its trigger LOW and is started by a
+    // HIGH pulse. A DYP A02 is the other way round: the datasheet says it starts on a
+    // FALLING edge and its timing diagram idles RX HIGH, dipping LOW to trigger.
+    //
+    // Driving an A02 the JSN way still produces a falling edge at the END of the pulse,
+    // so it half-works - which is worse than not working. It leaves the trigger line
+    // held LOW between pings, the module free-runs, and only the ping that happens to
+    // line up returns anything: a steady ONE echo in five, every burst discarded as
+    // "too few echoes", with a plausible distance in the one that got through.
+    const bool idle = sn0->trigActiveLow;   // resting level
+    digitalWrite(trigPin, idle);
     delayMicroseconds(2);
-    digitalWrite(trigPin, HIGH);
+    digitalWrite(trigPin, !idle);
     delayMicroseconds(trigUs);
-    digitalWrite(trigPin, LOW);
+    digitalWrite(trigPin, idle);            // and LEAVE it resting, not asserted
 
     const MoonTankSensor *sn = activeSensor();
 
@@ -384,11 +394,12 @@ void MoonTankModule::diagnose()
     // MOONHUT_TANK_TRIG_US, not a hardcoded 10. A 10 us trigger does NOTHING on a JSN -
     // it needs 50 - so the sweep was firing a pulse too short to wake the very sensor it
     // was hunting for, and "NO pin pulsed" could mean "never asked" rather than "dead".
-    digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
+    const bool dIdle = activeSensor()->trigActiveLow;
+    digitalWrite(MOONHUT_TANK_TRIG_PIN, dIdle);
     delayMicroseconds(2);
-    digitalWrite(MOONHUT_TANK_TRIG_PIN, HIGH);
+    digitalWrite(MOONHUT_TANK_TRIG_PIN, !dIdle);
     delayMicroseconds(activeSensor()->trigUs);
-    digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
+    digitalWrite(MOONHUT_TANK_TRIG_PIN, dIdle);
 
     const uint32_t t0 = micros();
     bool prev[sizeof(candidates)] = {};
