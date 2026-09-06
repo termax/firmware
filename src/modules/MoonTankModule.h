@@ -296,11 +296,10 @@ class MoonTankModule : public concurrency::OSThread
   private:
     float pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs); // one cycle, metres, NAN on timeout
 
-    /// One filtered burst on the given pins. Returns false and sets `why` when the
-    /// result should not be trusted; `median` is still set for the log unless nothing
-    /// answered at all.
-    bool burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n, const char *&why,
-               uint16_t trigUs = MOONHUT_TANK_TRIG_US);
+    /// Judge a collected sample set. Sorts `s` in place, sets median/spread, and sets
+    /// `why` when the result should not be trusted. `median` is still set for the log
+    /// unless nothing answered at all.
+    bool evaluate(float *s, uint8_t n, float &median, float &spread, const char *&why);
 
     void measure();
     void diagnose();   // runs after repeated silence: says WHY there is no echo
@@ -320,6 +319,31 @@ class MoonTankModule : public concurrency::OSThread
     uint8_t rateHead = 0;
     uint32_t lastRateAt = 0;
     bool drainAlarm = false;
+
+    // --- Sampling state machine ------------------------------------------------
+    //
+    // ONE ping per scheduler pass, not five in a row. Five back-to-back delay()s is
+    // ~600 ms of a 3 s cycle spent inside delay(), and Meshtastic's scheduler is
+    // COOPERATIVE - nothing else runs during that. It starved the button thread, whose
+    // library needs regular ticks to recognise a press, so PRG presses landing inside a
+    // burst were never seen at all: several presses produced one event.
+    //
+    // The fridge module already avoids this deliberately (setWaitForConversion(false));
+    // the lesson simply never got carried across. MVT1's button works and the tank
+    // nodes' did not, which is the A/B that identified it.
+    //
+    // Now runOnce() blocks only for a single pulseIn (25 ms worst case) and returns to
+    // the scheduler between pings. Same cadence, same samples, no starvation - and the
+    // LoRa timing stops sharing a core with half a second of delay().
+    enum SamplePhase : uint8_t { PHASE_A = 0, PHASE_B = 1, PHASE_EVAL = 2 };
+    SamplePhase phase = PHASE_A;
+    uint8_t pingIdx = 0;
+    float sampA[MOONHUT_TANK_SAMPLES] = {};
+    uint8_t nA = 0;
+#ifdef MOONHUT_TANK_DUAL
+    float sampB[MOONHUT_TANK_SAMPLES] = {};
+    uint8_t nB = 0;
+#endif
 
     bool calLoaded = false;     // littlefs is not mounted when modules are constructed
     float tankHeightM = 0.0f;   // 0 = uncalibrated

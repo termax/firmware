@@ -222,6 +222,13 @@ int32_t ButtonThread::runOnce()
             }
             if (_longPress != INPUT_BROKER_NONE) {
                 // Forward long press to InputBroker (but NOT as DOWN/SELECT, just forward a "button long press" event)
+                // Logged for the same reason as the short press: a LONG press emits
+                // INPUT_BROKER_SELECT, which the Screen handler does NOT act on (it only
+                // navigates on LEFT/RIGHT/ALT_PRESS/USER_PRESS). So holding the button
+                // past longPressTime does nothing AND says nothing - indistinguishable
+                // from a button that is not wired at all, which is exactly how it read.
+                LOG_INFO("Button: LONG press on GPIO %u (>%ums) -> event %d", (unsigned)_pinNum,
+                         (unsigned)_longPressTime, (int)_longPress);
                 evt.inputEvent = _longPress;
                 this->notifyObservers(&evt);
             }

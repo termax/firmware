@@ -68,23 +68,11 @@ float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs
     return m;
 }
 
-bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, float &spread, uint8_t &n,
-                           const char *&why, uint16_t trigUs)
+bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread, const char *&why)
 {
-    float s[MOONHUT_TANK_SAMPLES];
-    n = 0;
     why = nullptr;
     median = NAN;
     spread = NAN;
-
-    for (uint8_t i = 0; i < MOONHUT_TANK_SAMPLES; i++) {
-        const float m = pingOnce(trigPin, echoPin, trigUs);
-        if (!isnan(m))
-            s[n++] = m;
-        // The datasheet asks for >60 ms between pings so the previous burst has
-        // died away; less and you measure your own echo coming back off the tank.
-        delay(MOONHUT_TANK_PING_GAP_MS);
-    }
 
     if (n == 0) {
         why = "no echo";
@@ -119,9 +107,6 @@ bool MoonTankModule::burst(uint8_t trigPin, uint8_t echoPin, float &median, floa
         spread = hi - lo;
     }
 
-    // Two gates, both learned the hard way on the fridge bus: a reading nobody
-    // cross-checked, and a reading whose samples disagree, are both worse than no
-    // reading at all - because they look exactly as confident as a good one.
     // Consensus around the median, not min-to-max range. See the header: a single
     // ringdown sample or one multipath reflection must not veto a burst whose median is
     // perfectly good.
@@ -165,7 +150,8 @@ void MoonTankModule::measure()
 #else
     const uint16_t trigUs = MOONHUT_TANK_TRIG_US;
 #endif
-    const bool ok = burst(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, median, spread, n, why, trigUs);
+    const bool ok = evaluate(sampA, nA, median, spread, why);
+    n = nA;
 
     bursts++;
     lastRawM = median;   // kept even when rejected - see the header
@@ -178,10 +164,10 @@ void MoonTankModule::measure()
     reject = ok ? nullptr : why;
 
 #ifdef MOONHUT_TANK_DUAL
-    // Never overlap the two. This wait is longer than the echo timeout, so A's burst is
-    // fully dead before B speaks - see the header for why an overlap is worse than noise.
-    delay(MOONHUT_TANK_INTERLEAVE_MS);
-    const bool ok2 = burst(MOONHUT_TANK_TRIG_PIN2, MOONHUT_TANK_ECHO_PIN2, lastM2, lastSpread2, lastValid2, reject2);
+    // The two never overlap: the state machine waits MOONHUT_TANK_INTERLEAVE_MS between
+    // A's last ping and B's first - see the header for why an overlap is worse than noise.
+    const bool ok2 = evaluate(sampB, nB, lastM2, lastSpread2, reject2);
+    lastValid2 = nB;
     if (!ok2)
         lastM2 = NAN;
 
@@ -644,6 +630,45 @@ int32_t MoonTankModule::runOnce()
         loadCalibration();
     }
 
+#ifdef MOONHUT_TANK_TRIG_SWEEP
+    static const uint16_t widths[] = MOONHUT_TANK_TRIG_WIDTHS;
+    const uint16_t trigUs = widths[bursts % (sizeof(widths) / sizeof(widths[0]))];
+#else
+    const uint16_t trigUs = MOONHUT_TANK_TRIG_US;
+#endif
+
+    // ONE ping, then hand the CPU back. See the header: five back-to-back delay()s
+    // starved the button thread and PRG presses inside a burst were never seen.
+    if (phase == PHASE_A) {
+        const float m = pingOnce(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, trigUs);
+        if (!isnan(m) && nA < MOONHUT_TANK_SAMPLES)
+            sampA[nA++] = m;
+        if (++pingIdx < MOONHUT_TANK_SAMPLES)
+            return MOONHUT_TANK_PING_GAP_MS;
+        pingIdx = 0;
+#ifdef MOONHUT_TANK_DUAL
+        phase = PHASE_B;
+        return MOONHUT_TANK_INTERLEAVE_MS; // A must be fully dead before B speaks
+#else
+        phase = PHASE_EVAL;
+        return MOONHUT_TANK_PING_GAP_MS;
+#endif
+    }
+
+#ifdef MOONHUT_TANK_DUAL
+    if (phase == PHASE_B) {
+        const float m = pingOnce(MOONHUT_TANK_TRIG_PIN2, MOONHUT_TANK_ECHO_PIN2, trigUs);
+        if (!isnan(m) && nB < MOONHUT_TANK_SAMPLES)
+            sampB[nB++] = m;
+        if (++pingIdx < MOONHUT_TANK_SAMPLES)
+            return MOONHUT_TANK_PING_GAP_MS;
+        pingIdx = 0;
+        phase = PHASE_EVAL;
+        return MOONHUT_TANK_PING_GAP_MS;
+    }
+#endif
+
+    // PHASE_EVAL - judge what was collected, then start the next cycle.
     measure();
 
     // Announce a stall ONCE, edge-triggered, then say so again when it clears. A node
@@ -666,6 +691,12 @@ int32_t MoonTankModule::runOnce()
 
     report(false);
     serviceScreen(now);
+
+    nA = 0;
+#ifdef MOONHUT_TANK_DUAL
+    nB = 0;
+#endif
+    phase = PHASE_A;
     return MOONHUT_TANK_POLL_S * 1000;
 }
 
