@@ -24,9 +24,20 @@ static constexpr float SPEED_OF_SOUND_MS = 343.0f;
 
 // Bound the echo wait. pulseIn() BLOCKS, and this runs on the same core as the
 // LoRa timing - the same trap as the DS18B20's 750 ms conversion. 25 ms is about
-// 4.2 m there-and-back, past anything this sensor can honestly resolve, so a
-// missing echo costs 25 ms and not a stalled radio.
-static constexpr uint32_t ECHO_TIMEOUT_US = 25000;
+// 4.2 m there-and-back, past anything a JSN can honestly resolve, so a missing echo
+// costs 25 ms and not a stalled radio.
+//
+// OVERRIDABLE, because 25 ms is a JSN number and not a universal one. pulseIn()'s
+// timeout covers waiting for the pulse to START as well as its duration, and some
+// modules sit silent for a long time first: a DYP A02 waits T1 = 10-17 ms before the
+// echo pulse even begins, so 25 ms expires before its answer arrives and EVERY burst
+// reports "no echo" from a perfectly good sensor. Give that part 60000.
+// Note this bounds only the FAILURE case - a successful read returns as soon as the
+// echo falls, so raising it costs nothing when the sensor is working.
+#ifndef MOONHUT_TANK_ECHO_TIMEOUT_US
+#define MOONHUT_TANK_ECHO_TIMEOUT_US 25000
+#endif
+static constexpr uint32_t ECHO_TIMEOUT_US = MOONHUT_TANK_ECHO_TIMEOUT_US;
 
 // Below this the sensor is inside its own dead zone and the figure is meaningless.
 static constexpr float MIN_VALID_M = MOONHUT_TANK_MIN_VALID_M;
@@ -263,6 +274,16 @@ void MoonTankModule::diagnose()
 {
     static const uint8_t candidates[] = {15, 16, 17, 40, 41, 42, 47, 48};
 
+    // GPIO 17 is I2C_SDA on this board (18 is SCL). The bus idles HIGH on its pull-up and
+    // carries display traffic constantly, so an untreated sweep reports it as "pulsed" and
+    // then advises rebuilding ECHO onto it - which would break the OLED and fix nothing.
+    // That false positive was printed and nearly acted on while chasing a swapped JSN.
+#if defined(I2C_SDA) && defined(I2C_SCL)
+#define IS_I2C_PIN(p) ((p) == I2C_SDA || (p) == I2C_SCL)
+#else
+#define IS_I2C_PIN(p) (false)
+#endif
+
     // Ranger B's pins are excluded below wherever this sweep re-modes a pin. Re-moding a
     // pin that another sensor is using is exactly the mistake that made the fridge
     // button read phantom presses - a diagnostic must not disturb working hardware.
@@ -294,7 +315,7 @@ void MoonTankModule::diagnose()
     // HIGH against a ~45k pulldown has something external driving it.
     LOG_INFO("MoonTank: --- idle levels (HIGH = driven externally) ---");
     for (uint8_t pin : candidates) {
-        if (pin == MOONHUT_TANK_TRIG_PIN || IS_RANGER_B_PIN(pin))
+        if (pin == MOONHUT_TANK_TRIG_PIN || IS_RANGER_B_PIN(pin) || IS_I2C_PIN(pin))
             continue;
         pinMode(pin, INPUT_PULLDOWN);
         delayMicroseconds(300);
@@ -308,23 +329,29 @@ void MoonTankModule::diagnose()
     // alive and wired anywhere we can see, this finds it and names the pin.
     LOG_INFO("MoonTank: --- pulse sweep: triggering, watching all free pins ---");
     for (uint8_t pin : candidates)
-        if (pin != MOONHUT_TANK_TRIG_PIN && !IS_RANGER_B_PIN(pin))
+        if (pin != MOONHUT_TANK_TRIG_PIN && !IS_RANGER_B_PIN(pin) && !IS_I2C_PIN(pin))
             pinMode(pin, INPUT);
 
     uint32_t rose[sizeof(candidates)] = {};
     uint32_t fell[sizeof(candidates)] = {};
 
+    // MOONHUT_TANK_TRIG_US, not a hardcoded 10. A 10 us trigger does NOTHING on a JSN -
+    // it needs 50 - so the sweep was firing a pulse too short to wake the very sensor it
+    // was hunting for, and "NO pin pulsed" could mean "never asked" rather than "dead".
     digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
     delayMicroseconds(2);
     digitalWrite(MOONHUT_TANK_TRIG_PIN, HIGH);
-    delayMicroseconds(10);
+    delayMicroseconds(MOONHUT_TANK_TRIG_US);
     digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
 
     const uint32_t t0 = micros();
     bool prev[sizeof(candidates)] = {};
-    while (micros() - t0 < 40000) { // 40 ms: past anything this sensor can return
+    // 60 ms, not 40: an A02 can spend 17 ms before the pulse starts and 35 ms sending it,
+    // which a 40 ms window clips - and a clipped pulse reads as a short one, i.e. a wrong
+    // distance rather than an obvious failure.
+    while (micros() - t0 < 60000) {
         for (uint8_t i = 0; i < sizeof(candidates); i++) {
-            if (candidates[i] == MOONHUT_TANK_TRIG_PIN)
+            if (candidates[i] == MOONHUT_TANK_TRIG_PIN || IS_I2C_PIN(candidates[i]))
                 continue;
             const bool now = digitalRead(candidates[i]);
             if (now && !prev[i] && rose[i] == 0)
@@ -339,8 +366,16 @@ void MoonTankModule::diagnose()
     for (uint8_t i = 0; i < sizeof(candidates); i++) {
         if (rose[i] == 0)
             continue;
-        any = true;
         const uint32_t width = fell[i] > rose[i] ? fell[i] - rose[i] : 0;
+        // A rise with no matching fall has width 0 - that is a pin going high and STAYING
+        // high, which is a held line or bus noise, not an echo. Reporting it as a pulse is
+        // how the sweep came to recommend moving ECHO onto a pin carrying zero information.
+        if (width == 0) {
+            LOG_INFO("MoonTank: GPIO %u rose at %u us but never fell - held high, not an echo",
+                     candidates[i], (unsigned)rose[i]);
+            continue;
+        }
+        any = true;
         LOG_WARN("MoonTank: >>> GPIO %u pulsed: rose at %u us, width %u us (~%.3f m)", candidates[i],
                  (unsigned)rose[i], (unsigned)width, (width * 1e-6f * 343.0f) / 2.0f);
         if (candidates[i] != MOONHUT_TANK_ECHO_PIN)
