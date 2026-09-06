@@ -1911,8 +1911,17 @@ int Screen::handleUIFrameEvent(const UIFrameEvent *event)
 int Screen::handleInputEvent(const InputEvent *event)
 {
     LOG_INPUT("Screen Input event %u! kb %u", event->inputEvent, event->kbchar);
-    if (!screenOn)
+    if (!screenOn) {
+        // The press IS delivered - it is dropped here, and until now silently. A blanked
+        // screen swallows the whole event: PowerFSM wakes the display on the same press,
+        // but screenOn is still false when we get here, so nothing navigates. From outside
+        // that is indistinguishable from a button that never reached software, which is
+        // how the tank node's PRG read. It also explains the MVT1 A/B - an e-ink panel
+        // never blanks, so its presses always land with screenOn true.
+        LOG_INFO("Screen: input event %u DROPPED - screen is off (this press only wakes it)",
+                 (unsigned)event->inputEvent);
         return 0;
+    }
 
     // Handle text input notifications specially - pass input to virtual keyboard
     if (NotificationRenderer::current_notification_type == notificationTypeEnum::text_input) {
