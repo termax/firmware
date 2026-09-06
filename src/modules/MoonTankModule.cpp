@@ -28,11 +28,11 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // 50 us trigger is MEASURED: 10 us produced 0/5 echoes every time, 20 was marginal.
     // The 0.30 m floor is the RINGDOWN artifact - a rock-steady 0.23-0.25 m from this
     // part is the transducer still ringing, not a real short-range measurement.
-    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, "JSN-SR04T V3.3 waterproof, transducer on board"},
+    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, "JSN-SR04T V3.3 waterproof, transducer on board"},
 
     // HC-SR04P, the 3.3 V twin-transducer bench yardstick. Same interface and timing as
     // the JSN; NOT waterproof, so bench reference only, never a tank.
-    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
+    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
 
     // DYP A02 in PWM mode - waterproof bistatic probe, IP67, 3.3-5 V.
     // THREE things differ from the JSN and all three matter:
@@ -46,7 +46,12 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     //    ringdown artifact on OUR mounting, only that the datasheet claims 3 cm.
     // No target returns a FIXED ~35 ms pulse, which must be read as "nothing there"
     // rather than believed as ~6 m.
-    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
+    // 250 ms between pings, against the JSN's 100. MEASURED 2026-09-06: at 100 ms this
+    // part answered exactly ONE ping in five and the burst was thrown out as "too few
+    // echoes" - the remaining four land inside its recovery window and return nothing.
+    // The datasheet's ">70 ms period" is a floor for the trigger, not what the module
+    // needs to be ready again. Five pings now cost 1.25 s inside a 3 s poll.
+    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
 };
 const uint8_t MOONHUT_TANK_SENSOR_COUNT = sizeof(MOONHUT_TANK_SENSORS) / sizeof(MOONHUT_TANK_SENSORS[0]);
 
@@ -729,14 +734,14 @@ int32_t MoonTankModule::runOnce()
         if (!isnan(m) && nA < MOONHUT_TANK_SAMPLES)
             sampA[nA++] = m;
         if (++pingIdx < MOONHUT_TANK_SAMPLES)
-            return MOONHUT_TANK_PING_GAP_MS;
+            return activeSensor()->pingGapMs;
         pingIdx = 0;
 #ifdef MOONHUT_TANK_DUAL
         phase = PHASE_B;
         return MOONHUT_TANK_INTERLEAVE_MS; // A must be fully dead before B speaks
 #else
         phase = PHASE_EVAL;
-        return MOONHUT_TANK_PING_GAP_MS;
+        return activeSensor()->pingGapMs;
 #endif
     }
 
@@ -746,10 +751,10 @@ int32_t MoonTankModule::runOnce()
         if (!isnan(m) && nB < MOONHUT_TANK_SAMPLES)
             sampB[nB++] = m;
         if (++pingIdx < MOONHUT_TANK_SAMPLES)
-            return MOONHUT_TANK_PING_GAP_MS;
+            return activeSensor()->pingGapMs;
         pingIdx = 0;
         phase = PHASE_EVAL;
-        return MOONHUT_TANK_PING_GAP_MS;
+        return activeSensor()->pingGapMs;
     }
 #endif
 

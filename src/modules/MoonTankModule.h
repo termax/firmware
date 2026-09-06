@@ -101,6 +101,7 @@ struct MoonTankSensor {
     float minValidM;         // below this the reading is the part's own dead zone
     float maxValidM;
     uint32_t deadPulseUs;    // 0 = none; a fixed width some parts emit to mean "no target"
+    uint16_t pingGapMs;      // quiet time the part needs between triggers to answer again
     const char *desc;
 };
 
