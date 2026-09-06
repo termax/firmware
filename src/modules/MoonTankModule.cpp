@@ -20,28 +20,61 @@ MoonTankModule *moonTankModule = nullptr;
 // 3.3 m that is 16 cm of phantom level change - easily enough to fake a "tank
 // empty". Compensating needs an air temperature, so it is left as a constant here
 // and wired to a DS18B20 once the range test says this sensor is worth pursuing.
-static constexpr float SPEED_OF_SOUND_MS = 343.0f;
+// Every number below is MEASURED or datasheet, and each one has cost time when wrong.
+// A sensor whose timeout or dead zone is set for a different part does not read badly -
+// it does not read at all, which is indistinguishable from a wiring fault.
+const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
+    // JSN-SR04T V3.3, transducer soldered on the board. The one in service.
+    // 50 us trigger is MEASURED: 10 us produced 0/5 echoes every time, 20 was marginal.
+    // The 0.30 m floor is the RINGDOWN artifact - a rock-steady 0.23-0.25 m from this
+    // part is the transducer still ringing, not a real short-range measurement.
+    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, "JSN-SR04T V3.3 waterproof, transducer on board"},
 
-// Bound the echo wait. pulseIn() BLOCKS, and this runs on the same core as the
-// LoRa timing - the same trap as the DS18B20's 750 ms conversion. 25 ms is about
-// 4.2 m there-and-back, past anything a JSN can honestly resolve, so a missing echo
-// costs 25 ms and not a stalled radio.
-//
-// OVERRIDABLE, because 25 ms is a JSN number and not a universal one. pulseIn()'s
-// timeout covers waiting for the pulse to START as well as its duration, and some
-// modules sit silent for a long time first: a DYP A02 waits T1 = 10-17 ms before the
-// echo pulse even begins, so 25 ms expires before its answer arrives and EVERY burst
-// reports "no echo" from a perfectly good sensor. Give that part 60000.
-// Note this bounds only the FAILURE case - a successful read returns as soon as the
-// echo falls, so raising it costs nothing when the sensor is working.
-#ifndef MOONHUT_TANK_ECHO_TIMEOUT_US
-#define MOONHUT_TANK_ECHO_TIMEOUT_US 25000
-#endif
-static constexpr uint32_t ECHO_TIMEOUT_US = MOONHUT_TANK_ECHO_TIMEOUT_US;
+    // HC-SR04P, the 3.3 V twin-transducer bench yardstick. Same interface and timing as
+    // the JSN; NOT waterproof, so bench reference only, never a tank.
+    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
 
-// Below this the sensor is inside its own dead zone and the figure is meaningless.
-static constexpr float MIN_VALID_M = MOONHUT_TANK_MIN_VALID_M;
-static constexpr float MAX_VALID_M = 4.5f;
+    // DYP A02 in PWM mode - waterproof bistatic probe, IP67, 3.3-5 V.
+    // THREE things differ from the JSN and all three matter:
+    //  * it stays silent for T1 = 10-17 ms BEFORE the echo pulse starts, and pulseIn()
+    //    counts that wait against its timeout - 25 ms expires first and every burst
+    //    reports "no echo" from a working sensor. 60 ms.
+    //  * it is internally temperature compensated and fixes sound at 348 m/s, not 343
+    //    (datasheet: S_cm = T_us / 57.5). ~1.5 %, about 3 cm at 2 m.
+    //  * a 3 cm blind zone against the JSN's ringdown, so it can see much closer. 0.05
+    //    is still conservative here - we have not yet confirmed this part is free of the
+    //    ringdown artifact on OUR mounting, only that the datasheet claims 3 cm.
+    // No target returns a FIXED ~35 ms pulse, which must be read as "nothing there"
+    // rather than believed as ~6 m.
+    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
+};
+const uint8_t MOONHUT_TANK_SENSOR_COUNT = sizeof(MOONHUT_TANK_SENSORS) / sizeof(MOONHUT_TANK_SENSORS[0]);
+
+const MoonTankSensor *MoonTankModule::lookupSensor(const char *name) const
+{
+    if (!name || !*name)
+        return nullptr;
+    for (uint8_t i = 0; i < MOONHUT_TANK_SENSOR_COUNT; i++)
+        if (strcasecmp(name, MOONHUT_TANK_SENSORS[i].name) == 0)
+            return &MOONHUT_TANK_SENSORS[i];
+    return nullptr;
+}
+
+// Never returns null: an unknown stored name falls back to the default rather than
+// leaving the module with no numbers at all.
+const MoonTankSensor *MoonTankModule::activeSensor()
+{
+    if (!sensor) {
+        sensor = lookupSensor(MOONHUT_TANK_SENSOR_DEFAULT);
+        if (!sensor)
+            sensor = &MOONHUT_TANK_SENSORS[0];
+    }
+    return sensor;
+}
+
+// NOTE: the echo timeout, speed of sound and valid range used to live here as fixed
+// constants. They are per-sensor and now come from the active MoonTankSensor profile -
+// see the table above and `tank:sensor=`. Nothing should reintroduce a global here.
 
 MoonTankModule::MoonTankModule() : concurrency::OSThread("MoonTank")
 {
@@ -68,13 +101,21 @@ float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs
     delayMicroseconds(trigUs);
     digitalWrite(trigPin, LOW);
 
-    const uint32_t us = pulseIn(echoPin, HIGH, ECHO_TIMEOUT_US);
+    const MoonTankSensor *sn = activeSensor();
+
+    const uint32_t us = pulseIn(echoPin, HIGH, sn->echoTimeoutUs);
     if (us == 0)
         return NAN; // no echo inside the window
 
+    // Some parts answer "nothing out there" with a FIXED pulse width rather than
+    // silence. Believed literally that is a confident, plausible long distance - on a
+    // tank, a confident report of "empty". Treat it as no reading.
+    if (sn->deadPulseUs && us > sn->deadPulseUs - 2000 && us < sn->deadPulseUs + 2000)
+        return NAN;
+
     // Out and back, so half the flight time.
-    const float m = (us * 1e-6f * SPEED_OF_SOUND_MS) / 2.0f;
-    if (m < MIN_VALID_M || m > MAX_VALID_M)
+    const float m = (us * 1e-6f * sn->speedMs) / 2.0f;
+    if (m < sn->minValidM || m > sn->maxValidM)
         return NAN;
     return m;
 }
@@ -159,7 +200,7 @@ void MoonTankModule::measure()
     static const uint16_t widths[] = MOONHUT_TANK_TRIG_WIDTHS;
     const uint16_t trigUs = widths[bursts % (sizeof(widths) / sizeof(widths[0]))];
 #else
-    const uint16_t trigUs = MOONHUT_TANK_TRIG_US;
+    const uint16_t trigUs = activeSensor()->trigUs;
 #endif
     const bool ok = evaluate(sampA, nA, median, spread, why);
     n = nA;
@@ -341,7 +382,7 @@ void MoonTankModule::diagnose()
     digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
     delayMicroseconds(2);
     digitalWrite(MOONHUT_TANK_TRIG_PIN, HIGH);
-    delayMicroseconds(MOONHUT_TANK_TRIG_US);
+    delayMicroseconds(activeSensor()->trigUs);
     digitalWrite(MOONHUT_TANK_TRIG_PIN, LOW);
 
     const uint32_t t0 = micros();
@@ -349,7 +390,8 @@ void MoonTankModule::diagnose()
     // 60 ms, not 40: an A02 can spend 17 ms before the pulse starts and 35 ms sending it,
     // which a 40 ms window clips - and a clipped pulse reads as a short one, i.e. a wrong
     // distance rather than an obvious failure.
-    while (micros() - t0 < 60000) {
+    const uint32_t sweepUs = activeSensor()->echoTimeoutUs + 5000;
+    while (micros() - t0 < sweepUs) {
         for (uint8_t i = 0; i < sizeof(candidates); i++) {
             if (candidates[i] == MOONHUT_TANK_TRIG_PIN || IS_I2C_PIN(candidates[i]))
                 continue;
@@ -377,7 +419,7 @@ void MoonTankModule::diagnose()
         }
         any = true;
         LOG_WARN("MoonTank: >>> GPIO %u pulsed: rose at %u us, width %u us (~%.3f m)", candidates[i],
-                 (unsigned)rose[i], (unsigned)width, (width * 1e-6f * 343.0f) / 2.0f);
+                 (unsigned)rose[i], (unsigned)width, (width * 1e-6f * activeSensor()->speedMs) / 2.0f);
         if (candidates[i] != MOONHUT_TANK_ECHO_PIN)
             LOG_WARN("MoonTank: >>> that is NOT the configured ECHO pin (%d) - rebuild with "
                      "-D MOONHUT_TANK_ECHO_PIN=%u, or move the wire",
@@ -669,7 +711,7 @@ int32_t MoonTankModule::runOnce()
     static const uint16_t widths[] = MOONHUT_TANK_TRIG_WIDTHS;
     const uint16_t trigUs = widths[bursts % (sizeof(widths) / sizeof(widths[0]))];
 #else
-    const uint16_t trigUs = MOONHUT_TANK_TRIG_US;
+    const uint16_t trigUs = activeSensor()->trigUs;
 #endif
 
     // ONE ping, then hand the CPU back. See the header: five back-to-back delay()s
@@ -776,12 +818,30 @@ void MoonTankModule::loadCalibration()
     f.close();
     if (!n)
         return;
+    // Third field added 2026-09-06. sscanf returns the count it actually filled, so a
+    // file written by an older build (two fields) still loads and simply keeps the
+    // default profile - no migration, no version byte.
     float h = 0, o = 0;
-    if (sscanf(buf, "%f %f", &h, &o) >= 1) {
+    char sname[16] = {0};
+    const int got = sscanf(buf, "%f %f %15s", &h, &o, sname);
+    if (got >= 1) {
         tankHeightM = h;
         tankOffsetM = o;
         LOG_INFO("MoonTank: calibration loaded - height %.3f m, dead top %.3f m", tankHeightM, tankOffsetM);
     }
+    if (got >= 3) {
+        const MoonTankSensor *sn = lookupSensor(sname);
+        if (sn) {
+            sensor = sn;
+        } else {
+            LOG_WARN("MoonTank: stored sensor '%s' is not a known profile - falling back to %s", sname,
+                     activeSensor()->name);
+        }
+    }
+    LOG_INFO("MoonTank: sensor profile '%s' - %s (trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m)",
+             activeSensor()->name, activeSensor()->desc, (unsigned)activeSensor()->trigUs,
+             (unsigned)(activeSensor()->echoTimeoutUs / 1000), (double)activeSensor()->speedMs,
+             (double)activeSensor()->minValidM, (double)activeSensor()->maxValidM);
 }
 
 void MoonTankModule::saveCalibration()
@@ -791,11 +851,12 @@ void MoonTankModule::saveCalibration()
         LOG_ERROR("MoonTank: could not write %s", MOONHUT_TANK_CFG_PATH);
         return;
     }
-    char buf[48];
-    int n = snprintf(buf, sizeof(buf), "%.4f %.4f", tankHeightM, tankOffsetM);
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s", tankHeightM, tankOffsetM, activeSensor()->name);
     f.write((const uint8_t *)buf, n);
     f.close();
-    LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m", tankHeightM, tankOffsetM);
+    LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m, sensor %s", tankHeightM, tankOffsetM,
+             activeSensor()->name);
 }
 
 bool MoonTankModule::acceptsCommand(uint8_t channelIndex, bool pkiEncrypted) const
@@ -838,6 +899,31 @@ const char *MoonTankModule::handleCommand(const char *body)
                  (double)(tankHeightM - tankOffsetM));
         return reply;
     }
+    if (strncasecmp(body, "sensor=", 7) == 0) {
+        const char *want = body + 7;
+        const MoonTankSensor *sn = lookupSensor(want);
+        if (!sn) {
+            // Name every option rather than just refusing - the whole point of moving this
+            // to runtime is that it gets set with the sensor in hand and no source to read.
+            int off = snprintf(reply, sizeof(reply), "tank: unknown sensor '%s'. try:", want);
+            for (uint8_t i = 0; i < MOONHUT_TANK_SENSOR_COUNT && off < (int)sizeof(reply) - 1; i++)
+                off += snprintf(reply + off, sizeof(reply) - off, " %s", MOONHUT_TANK_SENSORS[i].name);
+            return reply;
+        }
+        sensor = sn;
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: sensor=%s (%s) trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m",
+                 sn->name, sn->desc, (unsigned)sn->trigUs, (unsigned)(sn->echoTimeoutUs / 1000), (double)sn->speedMs,
+                 (double)sn->minValidM, (double)sn->maxValidM);
+        return reply;
+    }
+    if (strncasecmp(body, "sensors", 7) == 0) {
+        int off = snprintf(reply, sizeof(reply), "tank: sensors:");
+        for (uint8_t i = 0; i < MOONHUT_TANK_SENSOR_COUNT && off < (int)sizeof(reply) - 1; i++)
+            off += snprintf(reply + off, sizeof(reply) - off, " %s%s", MOONHUT_TANK_SENSORS[i].name,
+                            &MOONHUT_TANK_SENSORS[i] == activeSensor() ? "*" : "");
+        return reply;
+    }
     if (strncasecmp(body, "clear", 5) == 0) {
         tankHeightM = 0.0f;
         tankOffsetM = 0.0f;
@@ -847,15 +933,16 @@ const char *MoonTankModule::handleCommand(const char *body)
     }
     if (strncasecmp(body, "show", 4) == 0) {
         if (!isCalibrated()) {
-            snprintf(reply, sizeof(reply), "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m", (double)lastM);
+            snprintf(reply, sizeof(reply), "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m sensor=%s", (double)lastM,
+                 activeSensor()->name);
             return reply;
         }
-        snprintf(reply, sizeof(reply), "tank: height=%.3f dead=%.3f usable=%.3f d=%.3f level=%.3f %.0f%%",
-                 (double)tankHeightM, (double)tankOffsetM, (double)(tankHeightM - tankOffsetM), (double)lastM,
-                 (double)levelM(), (double)levelPct());
+        snprintf(reply, sizeof(reply), "tank: sensor=%s height=%.3f dead=%.3f usable=%.3f d=%.3f level=%.3f %.0f%%",
+                 activeSensor()->name, (double)tankHeightM, (double)tankOffsetM,
+                 (double)(tankHeightM - tankOffsetM), (double)lastM, (double)levelM(), (double)levelPct());
         return reply;
     }
-    snprintf(reply, sizeof(reply), "tank: unknown command. try height=<m>, offset=<m>, show, clear");
+    snprintf(reply, sizeof(reply), "tank: unknown command. try height=<m>, offset=<m>, sensor=<name>, sensors, show, clear");
     return reply;
 }
 

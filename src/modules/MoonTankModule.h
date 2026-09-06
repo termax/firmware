@@ -78,6 +78,40 @@
 #define MOONHUT_TANK_PING_GAP_MS 60
 #endif
 
+// --- Sensor profiles -----------------------------------------------------
+//
+// The tested sensors are all trigger/echo parts, but they are NOT interchangeable:
+// they disagree on how long to wait for the echo, how fast they think sound travels,
+// and how close they can see. Getting one of those wrong does not produce a slightly
+// wrong reading - it produces NO reading, which looks exactly like a dead sensor or a
+// wiring fault, and that is where the evenings go.
+//
+// This was compile-time (-D flags) until 2026-09-06. It is runtime now because the
+// wrong choice is only discovered with the sensor in hand, and a rebuild-and-reflash
+// at the tank is the worst possible place to find out. Set it when provisioning:
+//
+//     tank:sensor=a02        (over MoonFleet or a PKI DM, like height= and offset=)
+//
+// The choice persists in the same littlefs file as the calibration.
+struct MoonTankSensor {
+    const char *name;
+    uint16_t trigUs;         // trigger pulse width
+    uint32_t echoTimeoutUs;  // pulseIn() bound: covers the WAIT for the pulse plus its length
+    float speedMs;           // speed of sound this part assumes
+    float minValidM;         // below this the reading is the part's own dead zone
+    float maxValidM;
+    uint32_t deadPulseUs;    // 0 = none; a fixed width some parts emit to mean "no target"
+    const char *desc;
+};
+
+extern const MoonTankSensor MOONHUT_TANK_SENSORS[];
+extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
+
+// Which profile a fresh node starts on, before anything is provisioned.
+#ifndef MOONHUT_TANK_SENSOR_DEFAULT
+#define MOONHUT_TANK_SENSOR_DEFAULT "jsn"
+#endif
+
 // DIAGNOSTIC: cycle the trigger width across bursts and log which one the sensor
 // answers. One flash instead of four, and it names the working width outright.
 #ifdef MOONHUT_TANK_TRIG_SWEEP
@@ -130,13 +164,11 @@
 #define MOONHUT_TANK_AGREE_MIN 3
 #endif
 
-// Near-field floor. Anything closer than this is discarded BEFORE filtering, because on
-// this sensor it is ringdown rather than a target. Raise it above the artifact you
-// actually observe: 0.247 m on the cable-mounted transducer, 0.227 m on the original.
-// The cost is real blindness below this distance - which the JSN has anyway.
-#ifndef MOONHUT_TANK_MIN_VALID_M
-#define MOONHUT_TANK_MIN_VALID_M 0.30f
-#endif
+// Near-field floor MOVED to the sensor profile (MoonTankSensor::minValidM), because it
+// is a property of the part, not of the build: on a JSN it is 0.30 m to clear RINGDOWN
+// (a rock-steady 0.227-0.247 m from that part is the transducer still ringing, not a
+// target), while an A02 claims a 3 cm blind zone and would be needlessly blinded by it.
+// A global here silently applied one sensor's artifact to another's readings.
 
 // Screen policy. On external power the panel never blanks - the whole point of the box
 // is a reading you can see. On battery it is allowed to sleep, but e-ink holds its last
@@ -281,6 +313,12 @@ class MoonTankModule : public concurrency::OSThread
 
     void loadCalibration();
     void saveCalibration();
+
+    // Active sensor profile. Never null - falls back to the default if a stored name
+    // no longer matches a known profile (e.g. a profile was renamed in a later build).
+    const MoonTankSensor *sensor = nullptr;
+    const MoonTankSensor *lookupSensor(const char *name) const;
+    const MoonTankSensor *activeSensor();
 
 #ifdef MOONHUT_TANK_DUAL
     /// The comparison sensor's last filtered distance, NAN if its burst was rejected.
