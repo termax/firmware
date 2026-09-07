@@ -523,6 +523,33 @@ void MoonTankModule::sendLine(const char *text)
 // Every accepted burst median goes in the ring, whether or not the fit wants a sample
 // this minute - the ring has to be full of RECENT bursts at the moment the decimation
 // boundary arrives, or the median is computed over stale readings.
+// One line per burst while aiming. Terse on purpose: it is read on a phone, outdoors,
+// by someone holding a probe in the other hand.
+//
+// The reject reason is the payload here, not an afterthought. A steady 0.23 m "ringdown"
+// means the module fired and heard nothing back - on a tank that is almost always a probe
+// that is not perpendicular to the water, because a flat surface is a mirror and reflects
+// a tilted beam away instead of back. That is a different action from "no echo", and the
+// person on the ladder needs to be told which.
+void MoonTankModule::sendLive()
+{
+    char line[96];
+    const unsigned long left = (unsigned long)((liveUntilMs - millis()) / 1000);
+    if (isnan(lastM)) {
+        char raw[24];
+        if (isnan(lastRawM))
+            snprintf(raw, sizeof(raw), "?");
+        else
+            snprintf(raw, sizeof(raw), "%.3f", (double)lastRawM);
+        snprintf(line, sizeof(line), "LIVE|d=?|raw=%s|e=%u/%u|why=%s|%lus left", raw, lastValid,
+                 MOONHUT_TANK_SAMPLES, reject ? reject : "no echo", left);
+    } else {
+        snprintf(line, sizeof(line), "LIVE|d=%.3f|sp=%.0fmm|e=%u/%u|%lus left", (double)lastM,
+                 (double)(lastSpreadM * 1000.0f), lastValid, MOONHUT_TANK_SAMPLES, left);
+    }
+    sendLine(line);
+}
+
 void MoonTankModule::pushBurst(float metres)
 {
     if (isnan(metres))
@@ -611,6 +638,26 @@ float MoonTankModule::levelRateMph() const
         return NAN;
     const double slope = (n * sxy - sx * sy) / denom; // metres of DISTANCE per hour
     return (float)(-slope);                           // negate: distance down = level up
+}
+
+// Called at the end of every burst. Kept out of report() deliberately: report() is
+// governed by the change/heartbeat/floor logic, and live aiming must not be entangled
+// with any of that - nor allowed to reset those timers.
+void MoonTankModule::serviceLive()
+{
+    if (!liveUntilMs)
+        return;
+    const uint32_t now = millis();
+    if ((int32_t)(now - liveUntilMs) >= 0) {
+        liveUntilMs = 0;
+        sendLine("LIVE|off (window expired)");
+        LOG_INFO("MoonTank: live mode expired");
+        return;
+    }
+    if ((int32_t)(now - nextLiveAtMs) < 0)
+        return;
+    nextLiveAtMs = now + MOONHUT_TANK_LIVE_PERIOD_S * 1000UL;
+    sendLive();
 }
 
 void MoonTankModule::report(bool force)
@@ -873,6 +920,7 @@ int32_t MoonTankModule::runOnce()
     }
 
     report(false);
+    serviceLive();
     serviceScreen(now);
 
     nA = 0;
@@ -1014,6 +1062,36 @@ const char *MoonTankModule::handleCommand(const char *body)
                  (double)(tankHeightM - tankOffsetM));
         return reply;
     }
+    if (strncasecmp(body, "live=", 5) == 0) {
+        // Aiming aid: broadcast every burst, including the failures, for a bounded window.
+        // NOT persisted and NOT resumed after a reboot - see the header.
+        const long v = atol(body + 5);
+        if (v < 0 || v > MOONHUT_TANK_LIVE_MAX_MIN) {
+            snprintf(reply, sizeof(reply), "tank: live must be 0-%u minutes, got %ld",
+                     (unsigned)MOONHUT_TANK_LIVE_MAX_MIN, v);
+            return reply;
+        }
+        if (v == 0) {
+            liveUntilMs = 0;
+            snprintf(reply, sizeof(reply), "tank: live off");
+            return reply;
+        }
+        liveUntilMs = millis() + (uint32_t)v * 60UL * 1000UL;
+        if (!liveUntilMs)     // millis() wrap landing exactly on 0 would read as "off"
+            liveUntilMs = 1;
+        nextLiveAtMs = millis();  // first line immediately, so you know it took
+        snprintf(reply, sizeof(reply), "tank: live %ld min, every %u s. tank:live=0 to stop", v,
+                 (unsigned)MOONHUT_TANK_LIVE_PERIOD_S);
+        return reply;
+    }
+    if (strncasecmp(body, "live", 4) == 0 && body[4] == 0) {
+        // Bare `tank:live` - the form someone actually types when in a hurry up a ladder.
+        liveUntilMs = millis() + (uint32_t)MOONHUT_TANK_LIVE_DEFAULT_MIN * 60UL * 1000UL;
+        nextLiveAtMs = millis();
+        snprintf(reply, sizeof(reply), "tank: live %u min, every %u s. tank:live=0 to stop",
+                 (unsigned)MOONHUT_TANK_LIVE_DEFAULT_MIN, (unsigned)MOONHUT_TANK_LIVE_PERIOD_S);
+        return reply;
+    }
     if (strncasecmp(body, "poll=", 5) == 0) {
         // Deliberately settable at runtime: the whole point is that a deployed node's
         // cadence can be retuned without a reflash, and this build ships fast ON PURPOSE
@@ -1078,7 +1156,8 @@ const char *MoonTankModule::handleCommand(const char *body)
         return reply;
     }
     snprintf(reply, sizeof(reply),
-             "tank: unknown command. try height=<m>, offset=<m>, poll=<s>, sensor=<name>, sensors, show, clear");
+             "tank: unknown command. try height=<m>, offset=<m>, live[=<min>], poll=<s>, sensor=<name>, "
+             "sensors, show, clear");
     return reply;
 }
 

@@ -281,6 +281,34 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_REPORT_S 60
 #endif
 
+// --- Live aiming mode ------------------------------------------------------
+//
+// Mounting a probe is a two-person job otherwise: one at the tank moving it, one at a
+// console reading the effect. `tank:live=<minutes>` collapses that to one person with a
+// phone - the node broadcasts every burst on the fleet channel while you aim.
+//
+// Three properties matter and each exists because the obvious version is wrong:
+//
+//  * It reports FAILURES, not just readings. While aiming, "0.229 ringdown" and "2.1 m
+//    ok" carry equal information - a mode that only speaks when the burst succeeds is
+//    silent during exactly the part you are trying to fix. The normal report path sends
+//    a bare `d=?`, which cannot tell ringdown from a timeout.
+//  * It is RATE LIMITED, and not to the poll rate. A packet is ~968 ms of airtime at
+//    LONG_FAST; broadcasting every 3 s is ~30 % duty on a shared channel, and this node
+//    already logs "Ch. util >25%. Skip send". 15 s is frequent enough to aim by.
+//  * It EXPIRES BY ITSELF. A live mode left on by someone who walked away is a node
+//    quietly flooding the mesh for as long as it has power. It is a bounded window with
+//    a hard ceiling, not a flag.
+#ifndef MOONHUT_TANK_LIVE_PERIOD_S
+#define MOONHUT_TANK_LIVE_PERIOD_S 15
+#endif
+#ifndef MOONHUT_TANK_LIVE_MAX_MIN
+#define MOONHUT_TANK_LIVE_MAX_MIN 30
+#endif
+#ifndef MOONHUT_TANK_LIVE_DEFAULT_MIN
+#define MOONHUT_TANK_LIVE_DEFAULT_MIN 10
+#endif
+
 // --- Stall detection -------------------------------------------------------
 //
 // A node in an enclosure at a tank has no serial cable, so "it stopped showing a
@@ -443,6 +471,12 @@ class MoonTankModule : public concurrency::OSThread
     float tankHeightM = 0.0f;   // 0 = uncalibrated
     float tankOffsetM = 0.0f;   // dead space at the top, subtracted from usable depth
     uint16_t pollS = MOONHUT_TANK_POLL_S; // live measurement cadence; `tank:poll=`, persisted
+    // Live aiming mode. Deliberately NOT persisted: it must never survive a reboot, or a
+    // node that reset while live comes back flooding the channel with nobody listening.
+    uint32_t liveUntilMs = 0;   // 0 = off
+    uint32_t nextLiveAtMs = 0;
+    void sendLive();
+    void serviceLive(); // called every burst; expires the window and paces the broadcasts
 
     float lastM = NAN;
     float lastSpreadM = NAN;
