@@ -189,6 +189,29 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_AGREE_MIN 3
 #endif
 
+// Runtime OVERRIDE of the profile's near-field floor. 0 = use the profile value.
+//
+// Added 2026-09-07 for tank 1, where a float-switch ball hangs ~0.34 m below the probe -
+// ABOVE the jsn profile's 0.30 m floor, so it was accepted as a valid reading with 5/5
+// echoes and 4 mm spread. On a 2 m tank that publishes as "almost full", permanently, and
+// no filter catches it because the reading is internally consistent.
+//
+// The geometry is what makes a single cutoff work: a FLOAT can only ever be CLOSER than
+// the water it sits above - as the tank fills it rises, so its distance shrinks. It never
+// appears beyond its resting distance. So everything nearer than the cutoff is the float
+// and everything beyond it is water.
+//
+// The cost is real and must be stated: this BLINDS the tank above the cutoff. When the
+// water is genuinely that high the node reports d=? rather than a number. That is the
+// honest failure - a float switch is the right instrument for "full", and this is the
+// right instrument for everything below it.
+//
+// Prefer PHYSICAL separation when the tank allows it (>=50 cm clear of the beam cone);
+// that keeps the whole range. This is the fallback for when geometry will not cooperate.
+#ifndef MOONHUT_TANK_FLOOR_MAX_M
+#define MOONHUT_TANK_FLOOR_MAX_M 2.0f
+#endif
+
 // Near-field floor MOVED to the sensor profile (MoonTankSensor::minValidM), because it
 // is a property of the part, not of the build: on a JSN it is 0.30 m to clear RINGDOWN
 // (a rock-steady 0.227-0.247 m from that part is the transducer still ringing, not a
@@ -307,6 +330,26 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #endif
 #ifndef MOONHUT_TANK_LIVE_DEFAULT_MIN
 #define MOONHUT_TANK_LIVE_DEFAULT_MIN 10
+#endif
+
+// FAILSAFE: live for this long after EVERY boot, with no command needed.
+//
+// The command path needs a text packet from ANOTHER node, so a person at a remote tank
+// with no laptop and no second radio has no way to ask the node anything. If the command
+// path is broken - and as of 2026-09-07 it has never been proven end to end - they get
+// no feedback at all and the trip is wasted.
+//
+// Power-cycling is the one input everybody has. So a boot gives a bounded window of
+// readings for free, and positioning a probe becomes: switch it off and on, then watch
+// the phone. 0 disables. Bounded, so a node that reboots in service costs the channel one
+// window and then goes quiet.
+#ifndef MOONHUT_TANK_LIVE_ON_BOOT_MIN
+#define MOONHUT_TANK_LIVE_ON_BOOT_MIN 15
+#endif
+// Do not speak the instant the module starts: channels and the radio are still coming up,
+// and the first line would be sent to nobody. Also keeps it out of the boot log noise.
+#ifndef MOONHUT_TANK_LIVE_ON_BOOT_DELAY_S
+#define MOONHUT_TANK_LIVE_ON_BOOT_DELAY_S 30
 #endif
 
 // --- Stall detection -------------------------------------------------------
@@ -473,6 +516,20 @@ class MoonTankModule : public concurrency::OSThread
     uint16_t pollS = MOONHUT_TANK_POLL_S; // live measurement cadence; `tank:poll=`, persisted
     // Live aiming mode. Deliberately NOT persisted: it must never survive a reboot, or a
     // node that reset while live comes back flooding the channel with nobody listening.
+    // Reporting cadence, runtime-settable 2026-09-07. These drive the ANALYTICS
+    // resolution (fill/drain rates), not the measurement rate - `pollS` is that. They were
+    // build flags, which meant the data resolution of a node in a box at a tank could only
+    // be changed by opening the box. 0 = use the compile-time default.
+    uint32_t reportS = 0;      // heartbeat; 0 = MOONHUT_TANK_REPORT_S
+    uint32_t minReportS = 0;   // floor under every report; 0 = MOONHUT_TANK_MIN_REPORT_S
+    float reportDeltaM = 0.0f; // report early on a change this big; 0 = the build default
+    uint32_t activeReportS() const { return reportS ? reportS : MOONHUT_TANK_REPORT_S; }
+    uint32_t activeMinReportS() const { return minReportS ? minReportS : MOONHUT_TANK_MIN_REPORT_S; }
+    float activeDeltaM() const { return reportDeltaM > 0.0f ? reportDeltaM : MOONHUT_TANK_REPORT_DELTA_M; }
+    float floorM = 0.0f;        // runtime near-field floor; 0 = use the sensor profile's
+    /// The floor actually in force: the runtime override when set, else the profile's.
+    // Not const: activeSensor() resolves the profile lazily and is itself non-const.
+    float activeFloorM() { return floorM > 0.0f ? floorM : activeSensor()->minValidM; }
     uint32_t liveUntilMs = 0;   // 0 = off
     uint32_t nextLiveAtMs = 0;
     void sendLive();

@@ -143,14 +143,14 @@ float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs
     const bool sentinel = sn->deadPulseUs && us > sn->deadPulseUs - 2000 && us < sn->deadPulseUs + 2000;
     const char *verdict = us == 0            ? "TIMEOUT - no pulse at all"
                           : sentinel         ? "NO TARGET - sensor's fixed no-echo pulse"
-                          : m < sn->minValidM ? "too near (under the profile floor)"
+                          : m < activeFloorM() ? "too near (under the floor)"
                           : m > sn->maxValidM ? "too far (over the profile ceiling)"
                                               : "ok";
     LOG_DEBUG("MoonTank ping: raw %u us -> %.3f m : %s", (unsigned)us, (double)m, verdict);
 
     if (us == 0 || sentinel)
         return NAN;
-    if (m < sn->minValidM || m > sn->maxValidM)
+    if (m < activeFloorM() || m > sn->maxValidM)
         return NAN;
     return m;
 }
@@ -674,9 +674,9 @@ void MoonTankModule::report(bool force)
     if (!isnan(lastM)) {
         if (isnan(reportedM)) {
             moved = true;
-        } else if (fabsf(lastM - reportedM) >= MOONHUT_TANK_REPORT_DELTA_M) {
+        } else if (fabsf(lastM - reportedM) >= activeDeltaM()) {
             // Believe it only when the previous sample said the same thing.
-            moved = !isnan(pendingM) && fabsf(lastM - pendingM) < MOONHUT_TANK_REPORT_DELTA_M;
+            moved = !isnan(pendingM) && fabsf(lastM - pendingM) < activeDeltaM();
             pendingM = lastM;
         } else {
             pendingM = NAN;
@@ -754,8 +754,8 @@ void MoonTankModule::report(bool force)
 
     reportedM = lastM;
     pendingM = NAN;
-    nextReportAt = now + (MOONHUT_TANK_REPORT_S * 1000UL);
-    nextMinReportAt = now + (MOONHUT_TANK_MIN_REPORT_S * 1000UL);
+    nextReportAt = now + (activeReportS() * 1000UL);
+    nextMinReportAt = now + (activeMinReportS() * 1000UL);
 }
 
 // Keep the panel lit on external power, and honest on battery.
@@ -855,6 +855,14 @@ int32_t MoonTankModule::runOnce()
         // told which sensor profile it is using.
         const MoonTankSensor *sn = activeSensor();
         LOG_INFO("MoonTank: sensor profile '%s' - %s", sn->name, sn->desc);
+#if MOONHUT_TANK_LIVE_ON_BOOT_MIN > 0
+        // Failsafe window - see the header. Deliberately here rather than in the
+        // constructor: littlefs and the channel list are up by now.
+        liveUntilMs = millis() + (uint32_t)MOONHUT_TANK_LIVE_ON_BOOT_MIN * 60UL * 1000UL;
+        nextLiveAtMs = millis() + (uint32_t)MOONHUT_TANK_LIVE_ON_BOOT_DELAY_S * 1000UL;
+        LOG_INFO("MoonTank: live-on-boot for %u min (tank:live=0 to stop)",
+                 (unsigned)MOONHUT_TANK_LIVE_ON_BOOT_MIN);
+#endif
         LOG_INFO("MoonTank: trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m, dead pulse %u us",
                  (unsigned)sn->trigUs, (unsigned)(sn->echoTimeoutUs / 1000), (double)sn->speedMs,
                  (double)sn->minValidM, (double)sn->maxValidM, (unsigned)sn->deadPulseUs);
@@ -967,7 +975,7 @@ void MoonTankModule::loadCalibration()
     auto f = FSCom.open(MOONHUT_TANK_CFG_PATH, FILE_O_READ);
     if (!f)
         return;
-    char buf[64] = {0};
+    char buf[128] = {0};
     size_t n = f.readBytes(buf, sizeof(buf) - 1);
     f.close();
     if (!n)
@@ -978,7 +986,11 @@ void MoonTankModule::loadCalibration()
     float h = 0, o = 0;
     char sname[16] = {0};
     unsigned poll = 0;
-    const int got = sscanf(buf, "%f %f %15s %u", &h, &o, sname, &poll);
+    float flr = 0;
+    unsigned rep = 0, minrep = 0;
+    float dlt = 0;
+    const int got = sscanf(buf, "%f %f %15s %u %f %u %u %f", &h, &o, sname, &poll, &flr,
+                           &rep, &minrep, &dlt);
     if (got >= 1) {
         tankHeightM = h;
         tankOffsetM = o;
@@ -995,6 +1007,28 @@ void MoonTankModule::loadCalibration()
     }
     // Range-checked on the way IN as well as from a command: a corrupt or hand-edited file
     // must not be able to park the module on a 0 s busy loop.
+    // Reporting cadence. Bounds mirror the command so a hand-edited file cannot set a
+    // heartbeat of 0 (which would report every burst and flood the channel).
+    if (got >= 8) {
+        if (rep == 0 || (rep >= 10 && rep <= 86400))
+            reportS = rep;
+        if (minrep == 0 || (minrep >= 5 && minrep <= 86400))
+            minReportS = minrep;
+        if (dlt >= 0.0f && dlt <= 5.0f)
+            reportDeltaM = dlt;
+        if (reportS || minReportS || reportDeltaM > 0.0f)
+            LOG_INFO("MoonTank: report cadence loaded - heartbeat %u s, floor %u s, delta %.3f m",
+                     (unsigned)activeReportS(), (unsigned)activeMinReportS(), (double)activeDeltaM());
+    }
+    if (got >= 5) {
+        if (flr >= 0.0f && flr <= MOONHUT_TANK_FLOOR_MAX_M) {
+            floorM = flr;
+            if (floorM > 0.0f)
+                LOG_INFO("MoonTank: near-field floor loaded - %.3f m (overrides the profile)", (double)floorM);
+        } else {
+            LOG_WARN("MoonTank: stored floor %.3f m is out of range - keeping the profile's", (double)flr);
+        }
+    }
     if (got >= 4) {
         if (poll >= MOONHUT_TANK_POLL_MIN_S && poll <= MOONHUT_TANK_POLL_MAX_S) {
             pollS = (uint16_t)poll;
@@ -1013,9 +1047,10 @@ void MoonTankModule::saveCalibration()
         LOG_ERROR("MoonTank: could not write %s", MOONHUT_TANK_CFG_PATH);
         return;
     }
-    char buf[64];
-    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u", tankHeightM, tankOffsetM, activeSensor()->name,
-                     (unsigned)pollS);
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u %.4f %u %u %.4f", tankHeightM, tankOffsetM,
+                     activeSensor()->name, (unsigned)pollS, (double)floorM, (unsigned)reportS,
+                     (unsigned)minReportS, (double)reportDeltaM);
     f.write((const uint8_t *)buf, n);
     f.close();
     LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m, sensor %s", tankHeightM, tankOffsetM,
@@ -1060,6 +1095,65 @@ const char *MoonTankModule::handleCommand(const char *body)
         saveCalibration();
         snprintf(reply, sizeof(reply), "tank: dead top=%.3f m -> usable %.3f m", (double)tankOffsetM,
                  (double)(tankHeightM - tankOffsetM));
+        return reply;
+    }
+    if (strncasecmp(body, "report=", 7) == 0 || strncasecmp(body, "minreport=", 10) == 0 ||
+        strncasecmp(body, "delta=", 6) == 0) {
+        // Analytics resolution: how often a report leaves the node, and how big a change
+        // jumps the queue. Separate from `poll=`, which is the MEASUREMENT rate.
+        const bool isRep = strncasecmp(body, "report=", 7) == 0;
+        const bool isMin = strncasecmp(body, "minreport=", 10) == 0;
+        const char *arg = body + (isRep ? 7 : isMin ? 10 : 6);
+        if (isRep || isMin) {
+            const long v = atol(arg);
+            // 0 restores the build default. The floor of 10/5 s exists because a
+            // heartbeat near the poll rate turns every burst into a LoRa packet.
+            if (v != 0 && (v < (isMin ? 5 : 10) || v > 86400)) {
+                snprintf(reply, sizeof(reply), "tank: %s must be 0 or %d-86400 s, got %ld",
+                         isMin ? "minreport" : "report", isMin ? 5 : 10, v);
+                return reply;
+            }
+            if (isRep)
+                reportS = (uint32_t)v;
+            else
+                minReportS = (uint32_t)v;
+        } else {
+            const float v = atof(arg);
+            if (v < 0.0f || v > 5.0f) {
+                snprintf(reply, sizeof(reply), "tank: delta must be 0-5 m, got %.3f", (double)v);
+                return reply;
+            }
+            reportDeltaM = v;
+        }
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: heartbeat=%us floor=%us delta=%.3fm",
+                 (unsigned)activeReportS(), (unsigned)activeMinReportS(), (double)activeDeltaM());
+        return reply;
+    }
+    if (strncasecmp(body, "floor=", 6) == 0) {
+        // Reject everything nearer than this. Exists for a float ball hanging in the beam:
+        // a float can only ever be CLOSER than the water, so one cutoff separates them.
+        // 0 restores the sensor profile's own floor.
+        const float v = atof(body + 6);
+        if (v < 0.0f || v > MOONHUT_TANK_FLOOR_MAX_M) {
+            snprintf(reply, sizeof(reply), "tank: floor must be 0-%.1f m (0 = profile default), got %.3f",
+                     (double)MOONHUT_TANK_FLOOR_MAX_M, (double)v);
+            return reply;
+        }
+        if (v > 0.0f && v >= activeSensor()->maxValidM) {
+            snprintf(reply, sizeof(reply), "tank: floor %.3f m is at or above this sensor's max %.3f m",
+                     (double)v, (double)activeSensor()->maxValidM);
+            return reply;
+        }
+        floorM = v;
+        saveCalibration();
+        // Say the COST out loud. A floor silently blinds the top of the tank, and someone
+        // setting it from a phone cannot see that in a number.
+        if (floorM > 0.0f)
+            snprintf(reply, sizeof(reply), "tank: floor=%.3f m - readings above this are BLIND (d=? when fuller)",
+                     (double)floorM);
+        else
+            snprintf(reply, sizeof(reply), "tank: floor=profile default (%.3f m)", (double)activeSensor()->minValidM);
         return reply;
     }
     if (strncasecmp(body, "live=", 5) == 0) {
@@ -1108,7 +1202,7 @@ const char *MoonTankModule::handleCommand(const char *body)
         // source to hand, and "why did my node stop answering quickly" is the next
         // question if the number is chosen blind.
         snprintf(reply, sizeof(reply), "tank: poll=%u s (%u pings/burst). reports still floored at %u s",
-                 (unsigned)pollS, (unsigned)MOONHUT_TANK_SAMPLES, (unsigned)MOONHUT_TANK_MIN_REPORT_S);
+                 (unsigned)pollS, (unsigned)MOONHUT_TANK_SAMPLES, (unsigned)activeMinReportS());
         return reply;
     }
     if (strncasecmp(body, "sensor=", 7) == 0) {
@@ -1145,19 +1239,22 @@ const char *MoonTankModule::handleCommand(const char *body)
     }
     if (strncasecmp(body, "show", 4) == 0) {
         if (!isCalibrated()) {
-            snprintf(reply, sizeof(reply), "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m sensor=%s poll=%us",
-                 (double)lastM, activeSensor()->name, (unsigned)pollS);
+            snprintf(reply, sizeof(reply),
+                     "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m sensor=%s poll=%us floor=%.2f",
+                     (double)lastM, activeSensor()->name, (unsigned)pollS, (double)activeFloorM());
             return reply;
         }
         snprintf(reply, sizeof(reply),
-                 "tank: sensor=%s poll=%us height=%.3f dead=%.3f usable=%.3f d=%.3f level=%.3f %.0f%%",
-                 activeSensor()->name, (unsigned)pollS, (double)tankHeightM, (double)tankOffsetM,
+                 "tank: sensor=%s poll=%us floor=%.2f height=%.3f dead=%.3f usable=%.3f d=%.3f "
+                 "level=%.3f %.0f%%",
+                 activeSensor()->name, (unsigned)pollS, (double)activeFloorM(), (double)tankHeightM,
+                 (double)tankOffsetM,
                  (double)(tankHeightM - tankOffsetM), (double)lastM, (double)levelM(), (double)levelPct());
         return reply;
     }
     snprintf(reply, sizeof(reply),
-             "tank: unknown command. try height=<m>, offset=<m>, live[=<min>], poll=<s>, sensor=<name>, "
-             "sensors, show, clear");
+             "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, live[=<min>], poll=<s>, "
+             "report=<s>, minreport=<s>, delta=<m>, sensor=<name>, sensors, show, clear");
     return reply;
 }
 
