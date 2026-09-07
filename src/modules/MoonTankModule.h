@@ -366,6 +366,13 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_STALL_S 600
 #endif
 
+#ifndef MOONHUT_TANK_HEIGHT_DEFAULT
+#define MOONHUT_TANK_HEIGHT_DEFAULT 0.0f
+#endif
+#ifndef MOONHUT_TANK_OFFSET_DEFAULT
+#define MOONHUT_TANK_OFFSET_DEFAULT 0.0f
+#endif
+
 // --- Calibration -----------------------------------------------------------
 //
 // The node needs a tank height locally to show a percentage on its own panel, which is
@@ -511,8 +518,14 @@ class MoonTankModule : public concurrency::OSThread
 #endif
 
     bool calLoaded = false;     // littlefs is not mounted when modules are constructed
-    float tankHeightM = 0.0f;   // 0 = uncalibrated
-    float tankOffsetM = 0.0f;   // dead space at the top, subtracted from usable depth
+    // Build defaults so a node comes up CALIBRATED even if the stored file is missing or
+    // stale. Added 2026-09-07: tank 1's node-side height did not survive a reflash (cause
+    // still unexplained) and the panel then read 0 %, which at a tank is worse than
+    // useless - it says "empty" to anyone walking past while the data is perfectly fine.
+    // A stored value still wins; these only fill in when there is nothing valid to load.
+    // NOTE: `tank:clear` therefore returns to THIS value, not to 0.
+    float tankHeightM = MOONHUT_TANK_HEIGHT_DEFAULT;   // 0 = uncalibrated
+    float tankOffsetM = MOONHUT_TANK_OFFSET_DEFAULT; // dead space at the top, off usable depth
     uint16_t pollS = MOONHUT_TANK_POLL_S; // live measurement cadence; `tank:poll=`, persisted
     // Live aiming mode. Deliberately NOT persisted: it must never survive a reboot, or a
     // node that reset while live comes back flooding the channel with nobody listening.

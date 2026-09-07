@@ -854,6 +854,11 @@ int32_t MoonTankModule::runOnce()
         // node that has never been calibrated is exactly the one where you most need to be
         // told which sensor profile it is using.
         const MoonTankSensor *sn = activeSensor();
+        // Unconditional: the EFFECTIVE calibration, whatever its source. loadCalibration()
+        // only logs when it applied a stored value, so a node running on build defaults
+        // looked identical to one that had loaded a zero. That cost a bad diagnosis.
+        LOG_INFO("MoonTank: CAL height=%.3f m dead=%.3f m (usable %.3f m)", (double)tankHeightM,
+                 (double)tankOffsetM, (double)(tankHeightM - tankOffsetM));
         LOG_INFO("MoonTank: sensor profile '%s' - %s", sn->name, sn->desc);
 #if MOONHUT_TANK_LIVE_ON_BOOT_MIN > 0
         // Failsafe window - see the header. Deliberately here rather than in the
@@ -991,7 +996,10 @@ void MoonTankModule::loadCalibration()
     float dlt = 0;
     const int got = sscanf(buf, "%f %f %15s %u %f %u %u %f", &h, &o, sname, &poll, &flr,
                            &rep, &minrep, &dlt);
-    if (got >= 1) {
+    // Only let a STORED height win if it is real. A zero means the file predates
+    // calibration (or was written uncalibrated), and clobbering a build default with it is
+    // how a node ends up displaying 0 % at a tank that is half full.
+    if (got >= 1 && h > 0.0f) {
         tankHeightM = h;
         tankOffsetM = o;
         LOG_INFO("MoonTank: calibration loaded - height %.3f m, dead top %.3f m", tankHeightM, tankOffsetM);
