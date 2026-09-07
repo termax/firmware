@@ -880,7 +880,7 @@ int32_t MoonTankModule::runOnce()
     nB = 0;
 #endif
     phase = PHASE_A;
-    return MOONHUT_TANK_POLL_S * 1000;
+    return (int32_t)pollS * 1000;
 }
 
 
@@ -924,12 +924,13 @@ void MoonTankModule::loadCalibration()
     f.close();
     if (!n)
         return;
-    // Third field added 2026-09-06. sscanf returns the count it actually filled, so a
-    // file written by an older build (two fields) still loads and simply keeps the
-    // default profile - no migration, no version byte.
+    // Third field added 2026-09-06, fourth (poll seconds) 2026-09-07. sscanf returns the
+    // count it actually filled, so a file written by an older build still loads and simply
+    // keeps the defaults for the fields it lacks - no migration, no version byte.
     float h = 0, o = 0;
     char sname[16] = {0};
-    const int got = sscanf(buf, "%f %f %15s", &h, &o, sname);
+    unsigned poll = 0;
+    const int got = sscanf(buf, "%f %f %15s %u", &h, &o, sname, &poll);
     if (got >= 1) {
         tankHeightM = h;
         tankOffsetM = o;
@@ -944,6 +945,17 @@ void MoonTankModule::loadCalibration()
                      activeSensor()->name);
         }
     }
+    // Range-checked on the way IN as well as from a command: a corrupt or hand-edited file
+    // must not be able to park the module on a 0 s busy loop.
+    if (got >= 4) {
+        if (poll >= MOONHUT_TANK_POLL_MIN_S && poll <= MOONHUT_TANK_POLL_MAX_S) {
+            pollS = (uint16_t)poll;
+            LOG_INFO("MoonTank: poll interval loaded - %u s", (unsigned)pollS);
+        } else {
+            LOG_WARN("MoonTank: stored poll %u s is out of range %u-%u - keeping %u s", poll,
+                     (unsigned)MOONHUT_TANK_POLL_MIN_S, (unsigned)MOONHUT_TANK_POLL_MAX_S, (unsigned)pollS);
+        }
+    }
 }
 
 void MoonTankModule::saveCalibration()
@@ -954,7 +966,8 @@ void MoonTankModule::saveCalibration()
         return;
     }
     char buf[64];
-    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s", tankHeightM, tankOffsetM, activeSensor()->name);
+    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u", tankHeightM, tankOffsetM, activeSensor()->name,
+                     (unsigned)pollS);
     f.write((const uint8_t *)buf, n);
     f.close();
     LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m, sensor %s", tankHeightM, tankOffsetM,
@@ -1001,6 +1014,25 @@ const char *MoonTankModule::handleCommand(const char *body)
                  (double)(tankHeightM - tankOffsetM));
         return reply;
     }
+    if (strncasecmp(body, "poll=", 5) == 0) {
+        // Deliberately settable at runtime: the whole point is that a deployed node's
+        // cadence can be retuned without a reflash, and this build ships fast ON PURPOSE
+        // as the fleet's fast-response ranger testbed. See MOONHUT_TANK_POLL_S.
+        const long v = atol(body + 5);
+        if (v < MOONHUT_TANK_POLL_MIN_S || v > MOONHUT_TANK_POLL_MAX_S) {
+            snprintf(reply, sizeof(reply), "tank: poll must be %u-%u s, got %ld", (unsigned)MOONHUT_TANK_POLL_MIN_S,
+                     (unsigned)MOONHUT_TANK_POLL_MAX_S, v);
+            return reply;
+        }
+        pollS = (uint16_t)v;
+        saveCalibration();
+        // Name the trade-off in the reply. This is set from a phone at a tank with no
+        // source to hand, and "why did my node stop answering quickly" is the next
+        // question if the number is chosen blind.
+        snprintf(reply, sizeof(reply), "tank: poll=%u s (%u pings/burst). reports still floored at %u s",
+                 (unsigned)pollS, (unsigned)MOONHUT_TANK_SAMPLES, (unsigned)MOONHUT_TANK_MIN_REPORT_S);
+        return reply;
+    }
     if (strncasecmp(body, "sensor=", 7) == 0) {
         const char *want = body + 7;
         const MoonTankSensor *sn = lookupSensor(want);
@@ -1035,16 +1067,18 @@ const char *MoonTankModule::handleCommand(const char *body)
     }
     if (strncasecmp(body, "show", 4) == 0) {
         if (!isCalibrated()) {
-            snprintf(reply, sizeof(reply), "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m sensor=%s", (double)lastM,
-                 activeSensor()->name);
+            snprintf(reply, sizeof(reply), "tank: UNCALIBRATED - set tank:height=<m>. d=%.3f m sensor=%s poll=%us",
+                 (double)lastM, activeSensor()->name, (unsigned)pollS);
             return reply;
         }
-        snprintf(reply, sizeof(reply), "tank: sensor=%s height=%.3f dead=%.3f usable=%.3f d=%.3f level=%.3f %.0f%%",
-                 activeSensor()->name, (double)tankHeightM, (double)tankOffsetM,
+        snprintf(reply, sizeof(reply),
+                 "tank: sensor=%s poll=%us height=%.3f dead=%.3f usable=%.3f d=%.3f level=%.3f %.0f%%",
+                 activeSensor()->name, (unsigned)pollS, (double)tankHeightM, (double)tankOffsetM,
                  (double)(tankHeightM - tankOffsetM), (double)lastM, (double)levelM(), (double)levelPct());
         return reply;
     }
-    snprintf(reply, sizeof(reply), "tank: unknown command. try height=<m>, offset=<m>, sensor=<name>, sensors, show, clear");
+    snprintf(reply, sizeof(reply),
+             "tank: unknown command. try height=<m>, offset=<m>, poll=<s>, sensor=<name>, sensors, show, clear");
     return reply;
 }
 

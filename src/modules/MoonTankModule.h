@@ -121,9 +121,31 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_TRIG_WIDTHS {10, 20, 30, 50, 100, 200}
 #endif
 
-// Seconds between measurements.
+// Seconds between measurements - the COMPILE-TIME DEFAULT only. The live value is
+// `pollS`, settable over the air with `tank:poll=<s>` and persisted, so a deployed
+// node's cadence can be changed without a reflash. See MOONHUT_TANK_POLL_MIN_S below.
+//
+// The tank build deliberately ships at 3 s, which is far faster than a water tank
+// needs: MIN_REPORT_S is 120, so ~40 bursts happen between the two earliest possible
+// reports and 39 of them cannot affect anything that leaves the node. It is kept fast
+// on purpose - this module is the fleet's fast-response ranger testbed, and other
+// projects (pump-lamp detection, anything reacting to an object crossing the beam)
+// want sub-10 s latency. It is NOT a sensible default for a battery node: at 3 s the
+// ESP32-S3 never sleeps, which dominates the power budget by far.
 #ifndef MOONHUT_TANK_POLL_S
 #define MOONHUT_TANK_POLL_S 2
+#endif
+
+// Bounds on the runtime value. The floor is 1 s rather than 0 because a burst itself
+// occupies SAMPLES * pingGapMs (~500 ms at the tank build's settings) and a 0 would
+// mean runOnce() re-arming with no gap at all - a busy loop wearing a scheduler's
+// clothes. The ceiling is an hour; anything longer wants the sensor's power gated and
+// the MCU actually asleep, which is a different firmware shape, not a bigger number.
+#ifndef MOONHUT_TANK_POLL_MIN_S
+#define MOONHUT_TANK_POLL_MIN_S 1
+#endif
+#ifndef MOONHUT_TANK_POLL_MAX_S
+#define MOONHUT_TANK_POLL_MAX_S 3600
 #endif
 
 // How many raw pings go into one reported figure. Ultrasonics throw spurious
@@ -420,6 +442,7 @@ class MoonTankModule : public concurrency::OSThread
     bool calLoaded = false;     // littlefs is not mounted when modules are constructed
     float tankHeightM = 0.0f;   // 0 = uncalibrated
     float tankOffsetM = 0.0f;   // dead space at the top, subtracted from usable depth
+    uint16_t pollS = MOONHUT_TANK_POLL_S; // live measurement cadence; `tank:poll=`, persisted
 
     float lastM = NAN;
     float lastSpreadM = NAN;
