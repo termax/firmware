@@ -447,12 +447,22 @@ BurstVerdict MoonTankModule::judgeBurst(bool accepted)
         return BURST_SILENT;
     const float lo = activeRingLo(), hi = activeRingHi();
     const bool bandKnown = lo > 0.0f && hi > lo;
-    // PERFECT blind burst: nothing but near-field pings, all inside the measured band,
-    // agreeing. Any timeout, runt, sentinel, far or valid echo makes it MIXED - a burst
-    // that contains two kinds of answer is evidence that the scene is ambiguous.
+    // PERFECT blind burst: nothing but sub-floor pings, none shorter than the ringdown's
+    // lower edge, agreeing. Any timeout, runt, sentinel, far or valid echo makes it
+    // MIXED - a burst that contains two kinds of answer is evidence that the scene is
+    // ambiguous.
+    //
+    // Only the LOWER edge of the band is a gate. MEASURED 2026-09-08 (tank 1, blind
+    // entry, 204 sub-floor pings, 0 timeouts): the part rings at 0.246-0.255 when the
+    // surface is deep in the near field, but between there and the 0.30 m floor it returns
+    // REAL echoes - 175 of the 204 were a continuum 0.256-0.297 m. Those are a surface
+    // inside the dead zone too, and requiring them to sit inside the ringdown band would
+    // have called most of that afternoon UNKNOWN. A pulse at least as long as the
+    // shortest genuine ringdown is the proof of life; the runt class catches everything
+    // shorter.
+    (void)hi;
     if (bandKnown && e.ok == 0 && e.timeouts == 0 && e.runts == 0 && e.sentinels == 0 && e.fars == 0 &&
-        e.nears >= MOONHUT_TANK_BLIND_MIN_NEAR && e.nearLo >= lo && e.nearHi <= hi &&
-        e.nearSpread() <= MOONHUT_TANK_BLIND_MAX_SPREAD_M)
+        e.nears >= MOONHUT_TANK_BLIND_MIN_NEAR && e.nearLo >= lo && e.nearSpread() <= MOONHUT_TANK_BLIND_MAX_SPREAD_M)
         return BURST_BLIND;
     return BURST_MIXED;
 }
@@ -1108,9 +1118,9 @@ int32_t MoonTankModule::runOnce()
                  (unsigned)sn->trigUs, (unsigned)(sn->echoTimeoutUs / 1000), (double)sn->speedMs,
                  (double)sn->minValidM, (double)sn->maxValidM, (unsigned)sn->deadPulseUs);
         if (activeRingHi() > activeRingLo() && activeRingLo() > 0.0f)
-            LOG_INFO("MoonTank: ringdown band %.3f-%.3f m (%s) - FULL is claimable below the %.3f m floor",
+            LOG_INFO("MoonTank: ringdown band %.3f-%.3f m (%s) - sub-floor pings >= %.3f m can claim FULL below the %.3f m floor",
                      (double)activeRingLo(), (double)activeRingHi(), ringHiM > ringLoM ? "runtime" : "profile",
-                     (double)activeFloorM());
+                     (double)activeRingLo(), (double)activeFloorM());
         else
             LOG_WARN("MoonTank: ringdown band UNMEASURED for '%s' - this node can report FAULT but never FULL", sn->name);
     }

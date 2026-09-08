@@ -105,10 +105,13 @@ struct MoonTankSensor {
     bool trigActiveLow;      // true = line IDLES HIGH and the trigger is a dip to LOW
     uint16_t echoBlankUs;    // deafen this long after the trigger; 0 = listen immediately
     // RINGDOWN band: the fixed, sub-floor width this part returns when the target is
-    // inside its near field (the transducer hears its own burst). A burst of NOTHING BUT
-    // pings in this band is positive evidence the sensor is alive and the surface is
-    // close - that is what tells a FULL tank from a DEAD sensor. 0,0 = unmeasured on this
-    // part, and an unmeasured part can never claim FULL. See MOONHUT_TANK_RUNT_M.
+    // deep inside its near field (the transducer hears its own burst). A burst of NOTHING
+    // BUT sub-floor pings no shorter than ringLoM is positive evidence the sensor is
+    // alive and the surface is close - that is what tells a FULL tank from a DEAD sensor.
+    // Only ringLoM gates (between ringHiM and the floor the part returns REAL echoes of a
+    // surface that is still inside the dead zone - measured, see judgeBurst); ringHiM is
+    // descriptive. 0,0 = unmeasured on this part, and an unmeasured part can never claim
+    // FULL. See MOONHUT_TANK_RUNT_M.
     float ringLoM;
     float ringHiM;
     const char *desc;
@@ -253,8 +256,8 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 //
 // So every ping now carries a CLASS out of pingOnce(), and a burst is judged on the
 // whole set:
-//   BURST_BLIND  = zero valid echoes, zero silent pings, >= BLIND_MIN_NEAR pings inside
-//                  the profile's ringdown band, agreeing to within BLIND_MAX_SPREAD_M
+//   BURST_BLIND  = zero valid echoes, zero silent pings, >= BLIND_MIN_NEAR sub-floor pings
+//                  no shorter than the ringdown's lower edge, agreeing to BLIND_MAX_SPREAD_M
 //   BURST_SILENT = only timeouts and runts - nothing came back at all
 //   BURST_MIXED  = everything else (3 ringdowns + 2 timeouts is NOT evidence of anything)
 // and the module state is a run of them: FAULT is tested FIRST (STATE_RUN silent bursts),
