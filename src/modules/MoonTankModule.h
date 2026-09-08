@@ -104,6 +104,13 @@ struct MoonTankSensor {
     uint16_t pingGapMs;      // quiet time the part needs between triggers to answer again
     bool trigActiveLow;      // true = line IDLES HIGH and the trigger is a dip to LOW
     uint16_t echoBlankUs;    // deafen this long after the trigger; 0 = listen immediately
+    // RINGDOWN band: the fixed, sub-floor width this part returns when the target is
+    // inside its near field (the transducer hears its own burst). A burst of NOTHING BUT
+    // pings in this band is positive evidence the sensor is alive and the surface is
+    // close - that is what tells a FULL tank from a DEAD sensor. 0,0 = unmeasured on this
+    // part, and an unmeasured part can never claim FULL. See MOONHUT_TANK_RUNT_M.
+    float ringLoM;
+    float ringHiM;
     const char *desc;
 };
 
@@ -234,6 +241,63 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 // that keeps the whole range. This is the fallback for when geometry will not cooperate.
 #ifndef MOONHUT_TANK_FLOOR_MAX_M
 #define MOONHUT_TANK_FLOOR_MAX_M 2.0f
+#endif
+
+// --- Blind-vs-fault evidence (2026-09-08) ------------------------------------
+//
+// A full tank and a dead sensor used to leave the node as the same line: `d=?|why=no
+// echo`. The sensor itself knows the difference and the code was throwing it away:
+// water inside the near field returns a rock-steady RINGDOWN pulse (MEASURED on tank 1,
+// 2026-09-08: 204 pings, 0 timeouts, 0.246-0.255 m, for the whole time the surface was
+// inside the 0.30 m floor), while a dead or unwired sensor returns NO PULSE AT ALL.
+//
+// So every ping now carries a CLASS out of pingOnce(), and a burst is judged on the
+// whole set:
+//   BURST_BLIND  = zero valid echoes, zero silent pings, >= BLIND_MIN_NEAR pings inside
+//                  the profile's ringdown band, agreeing to within BLIND_MAX_SPREAD_M
+//   BURST_SILENT = only timeouts and runts - nothing came back at all
+//   BURST_MIXED  = everything else (3 ringdowns + 2 timeouts is NOT evidence of anything)
+// and the module state is a run of them: FAULT is tested FIRST (STATE_RUN silent bursts),
+// then FULL (STATE_RUN perfect blind bursts with no bad burst in the last BLIND_CLEAN_
+// BURSTS, and the geometry and trend not vetoing). Entering FULL is hard; ONE imperfect
+// burst leaves it. A healthy transducer rings every single time it is fired -
+// intermittent silence is a dying transducer, which is exactly what must never read full.
+//
+// RUNT is a SAFETY class, not tidiness: with NO sensor attached, the trigger edge couples
+// 1-12 us of crosstalk onto the adjacent echo pin (measured, see pingOnce). Without a
+// minimum width an unplugged sensor could satisfy the near-field test and read FULL.
+#ifndef MOONHUT_TANK_RUNT_M
+#define MOONHUT_TANK_RUNT_M 0.05f
+#endif
+#ifndef MOONHUT_TANK_BLIND_MIN_NEAR
+#define MOONHUT_TANK_BLIND_MIN_NEAR 4
+#endif
+#ifndef MOONHUT_TANK_BLIND_MAX_SPREAD_M
+#define MOONHUT_TANK_BLIND_MAX_SPREAD_M 0.020f
+#endif
+#ifndef MOONHUT_TANK_STATE_RUN
+#define MOONHUT_TANK_STATE_RUN 3
+#endif
+#ifndef MOONHUT_TANK_BLIND_CLEAN_BURSTS
+#define MOONHUT_TANK_BLIND_CLEAN_BURSTS 16
+#endif
+// Trend corroboration - ONE-DIRECTIONAL. The last good reading can only VETO a FULL
+// (blindness that began while the surface was still far from the floor is an object in
+// the beam, not water), never assert one, and it is unarmed after a boot or past its TTL.
+#ifndef MOONHUT_TANK_CONF_TTL_S
+#define MOONHUT_TANK_CONF_TTL_S 1800
+#endif
+#ifndef MOONHUT_TANK_CONF_NEAR_M
+#define MOONHUT_TANK_CONF_NEAR_M 0.15f
+#endif
+#ifndef MOONHUT_TANK_CONF_ODD_M
+#define MOONHUT_TANK_CONF_ODD_M 0.30f
+#endif
+// Geometry guard: FULL is only claimable when the blind edge IS the 100 % line. On a node
+// whose floor was RAISED (tank:floor=, to reject a float ball), going blind means the
+// float is in the beam, not that the tank is full.
+#ifndef MOONHUT_TANK_GEOM_SLACK_M
+#define MOONHUT_TANK_GEOM_SLACK_M 0.05f
 #endif
 
 // Near-field floor MOVED to the sensor profile (MoonTankSensor::minValidM), because it
@@ -416,10 +480,54 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_CFG_PATH "/tankcfg"
 #endif
 
+// What one ping came back as. pingOnce() is side-effect free on purpose - it is called
+// for both rangers under MOONHUT_TANK_DUAL - so the classification travels in the result.
+enum PingClass : uint8_t { PING_OK = 0, PING_TIMEOUT, PING_RUNT, PING_NEAR, PING_FAR, PING_SENTINEL };
+struct PingResult {
+    float m;        // metres, valid for OK/NEAR/FAR; NAN otherwise
+    uint32_t us;    // raw pulse width
+    PingClass cls;
+};
+
+// Tally of one burst, by class, plus the extent of the sub-floor pings.
+struct BurstEvidence {
+    uint8_t ok = 0, timeouts = 0, runts = 0, nears = 0, fars = 0, sentinels = 0;
+    float nearLo = NAN, nearHi = NAN;
+    void reset() { *this = BurstEvidence(); }
+    void add(const PingResult &r)
+    {
+        switch (r.cls) {
+        case PING_OK: ok++; break;
+        case PING_TIMEOUT: timeouts++; break;
+        case PING_RUNT: runts++; break;
+        case PING_FAR: fars++; break;
+        case PING_SENTINEL: sentinels++; break;
+        case PING_NEAR:
+            nears++;
+            if (isnan(nearLo) || r.m < nearLo) nearLo = r.m;
+            if (isnan(nearHi) || r.m > nearHi) nearHi = r.m;
+            break;
+        }
+    }
+    /// Nothing but timeouts and runts: the sensor did not answer at all.
+    bool allSilent() const { return ok == 0 && nears == 0 && fars == 0 && sentinels == 0; }
+    float nearSpread() const { return nears ? nearHi - nearLo : NAN; }
+};
+
+enum BurstVerdict : uint8_t { BURST_OK = 0, BURST_SILENT, BURST_BLIND, BURST_MIXED };
+enum TankState : uint8_t { TANK_UNKNOWN = 0, TANK_OK, TANK_BLIND_FULL, TANK_FAULT };
+
 class MoonTankModule : public concurrency::OSThread
 {
   public:
     MoonTankModule();
+
+    /// The module's verdict on the tank, from runs of bursts - see the evidence note above.
+    TankState state() const { return tankState; }
+    /// Wire/panel name: unk, ok, full, fault. Matches what the gateway's parser accepts.
+    const char *stateName() const;
+    /// The last burst's evidence, for the panel and the report.
+    const BurstEvidence &evidence() const { return lastEv; }
 
     /// Last filtered distance in metres, or NAN if the last burst found nothing.
     float distanceM() const { return lastM; }
@@ -482,7 +590,30 @@ class MoonTankModule : public concurrency::OSThread
     int32_t runOnce() override;
 
   private:
-    float pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs); // one cycle, metres, NAN on timeout
+    PingResult pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs); // one cycle, classified
+
+    // Blind-vs-fault: judge the burst as a whole, then advance the state machine.
+    BurstVerdict judgeBurst(bool accepted);
+    void updateState(BurstVerdict v);
+    const char *confidence();     // boot / stale / rise / near / none / odd - see CONF_* above
+    bool blindEdgeIsFull();       // geometry guard - see GEOM_SLACK_M
+    float activeRingLo() { return ringHiM > ringLoM ? ringLoM : activeSensor()->ringLoM; }
+    float activeRingHi() { return ringHiM > ringLoM ? ringHiM : activeSensor()->ringHiM; }
+    BurstEvidence evA;            // being collected this burst
+    BurstEvidence lastEv;         // the burst just judged
+    TankState tankState = TANK_UNKNOWN;
+    TankState shownState = TANK_UNKNOWN; // panel repaint gate - NAN->NAN transitions were invisible
+    uint8_t silentRun = 0;        // consecutive all-silent bursts
+    uint8_t blindRun = 0;         // consecutive perfect blind bursts
+    uint16_t badMask = 0;         // last 16 bursts, 1 = mixed or silent
+    float lastGoodM = NAN;        // for the trend corroboration
+    float prevGoodM = NAN;
+    uint32_t lastKnownAtMs = 0;   // last time the module KNEW something: a reading, or blind-full
+    float ringLoM = 0.0f, ringHiM = 0.0f; // runtime ringdown band; 0,0 = profile. `tank:ring=lo,hi`
+    // Ringdown band actually SEEN while a live window was open - emitted when it closes.
+    // This is the phase-3 measurement, for free: aim, watch, and the band prints itself.
+    float liveRingLo = NAN, liveRingHi = NAN;
+    uint32_t liveRingN = 0, liveTimeouts = 0, livePings = 0;
 
     /// Judge a collected sample set. Sorts `s` in place, sets median/spread, and sets
     /// `why` when the result should not be trusted. `median` is still set for the log
@@ -490,6 +621,7 @@ class MoonTankModule : public concurrency::OSThread
     bool evaluate(float *s, uint8_t n, float &median, float &spread, const char *&why);
 
     void measure();
+    void acceptReading(float median); // the accepted-burst half of measure()
     void diagnose();   // runs after repeated silence: says WHY there is no echo
     void report(bool force);
     void serviceScreen(uint32_t now);

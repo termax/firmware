@@ -30,6 +30,36 @@ void drawLevelFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, 
         return;
     }
 
+    // The two HARD states come before everything else, calibration included.
+    //
+    // FULL, not "100 %": a percentage implies a measurement and there is none - the
+    // surface is inside the near field, which is evidence of "at least this full".
+    // FAULT with NO percentage, no bar, no number: a full bar and a fault bar look
+    // identical from two metres away, and "LEVEL UNKNOWN" is the only honest thing to
+    // say about a sensor that is not answering.
+    const TankState st = moonTankModule->state();
+    const BurstEvidence &ev = moonTankModule->evidence();
+    if (st == TANK_BLIND_FULL || st == TANK_FAULT) {
+        display->setFont(FONT_LARGE);
+        display->drawString(midX, cursorY, st == TANK_BLIND_FULL ? "FULL" : "FAULT");
+        cursorY += FONT_HEIGHT_LARGE + 2;
+        display->setFont(FONT_SMALL);
+        char line[48];
+        if (st == TANK_BLIND_FULL) {
+            display->drawString(midX, cursorY, "surface in blind zone");
+            cursorY += FONT_HEIGHT_SMALL;
+            snprintf(line, sizeof(line), "ringdown %u/%u  %.0f mm", ev.nears, MOONHUT_TANK_SAMPLES,
+                     (double)(ev.nearSpread() * 1000.0f));
+        } else {
+            display->drawString(midX, cursorY, "LEVEL UNKNOWN");
+            cursorY += FONT_HEIGHT_SMALL;
+            snprintf(line, sizeof(line), "no pulse  %u/%u  check wiring", ev.timeouts + ev.runts, MOONHUT_TANK_SAMPLES);
+        }
+        display->drawString(midX, cursorY, line);
+        display->setTextAlignment(TEXT_ALIGN_LEFT);
+        return;
+    }
+
     if (!moonTankModule->isCalibrated()) {
         // Deliberately NOT a percentage of a guessed height. An invented number on a
         // panel is worse than an honest gap: somebody will believe it.

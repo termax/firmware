@@ -28,11 +28,16 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // 50 us trigger is MEASURED: 10 us produced 0/5 echoes every time, 20 was marginal.
     // The 0.30 m floor is the RINGDOWN artifact - a rock-steady 0.23-0.25 m from this
     // part is the transducer still ringing, not a real short-range measurement.
-    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, "JSN-SR04T V3.3 waterproof, transducer on board"},
+    // Ringdown band 0.20-0.28 m: MEASURED 0.227-0.247 (unit 1, 2026-09-05/06) and
+    // 0.246-0.255 (unit 2 on the pipe, 2026-09-08, 204/204 pings), plus margin.
+    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, 0.20f, 0.28f,
+     "JSN-SR04T V3.3 waterproof, transducer on board"},
 
     // HC-SR04P, the 3.3 V twin-transducer bench yardstick. Same interface and timing as
     // the JSN; NOT waterproof, so bench reference only, never a tank.
-    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, "HC-SR04P 3.3 V bench reference, NOT waterproof"},
+    // Ringdown UNMEASURED on this part (0,0): it can never claim FULL until it is.
+    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, 0.0f, 0.0f,
+     "HC-SR04P 3.3 V bench reference, NOT waterproof"},
 
     // DYP A02 in PWM mode - waterproof bistatic probe, IP67, 3.3-5 V.
     // THREE things differ from the JSN and all three matter:
@@ -51,7 +56,9 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // echoes" - the remaining four land inside its recovery window and return nothing.
     // The datasheet's ">70 ms period" is a floor for the trigger, not what the module
     // needs to be ready again. Five pings now cost 1.25 s inside a 3 s poll.
-    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, 5000, "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
+    // Ringdown UNMEASURED (0,0) - a bistatic part may not ring at all. Never FULL until measured.
+    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, 5000, 0.0f, 0.0f,
+     "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
 };
 const uint8_t MOONHUT_TANK_SENSOR_COUNT = sizeof(MOONHUT_TANK_SENSORS) / sizeof(MOONHUT_TANK_SENSORS[0]);
 
@@ -96,7 +103,7 @@ MoonTankModule::MoonTankModule() : concurrency::OSThread("MoonTank")
 #endif
 }
 
-float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs)
+PingResult MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs)
 {
     const MoonTankSensor *sn0 = activeSensor();
 
@@ -141,18 +148,22 @@ float MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t trigUs
     // One line per ping settles it, and a burst is only five of them every few seconds.
     const float m = (us * 1e-6f * sn->speedMs) / 2.0f;
     const bool sentinel = sn->deadPulseUs && us > sn->deadPulseUs - 2000 && us < sn->deadPulseUs + 2000;
-    const char *verdict = us == 0            ? "TIMEOUT - no pulse at all"
-                          : sentinel         ? "NO TARGET - sensor's fixed no-echo pulse"
-                          : m < activeFloorM() ? "too near (under the floor)"
-                          : m > sn->maxValidM ? "too far (over the profile ceiling)"
-                                              : "ok";
-    LOG_DEBUG("MoonTank ping: raw %u us -> %.3f m : %s", (unsigned)us, (double)m, verdict);
+    // Order matters: RUNT before NEAR, so trigger crosstalk can never count as a
+    // near-field ringdown - that is the one path by which an unplugged sensor could read
+    // FULL. See MOONHUT_TANK_RUNT_M.
+    const PingClass cls = us == 0                    ? PING_TIMEOUT
+                          : sentinel                 ? PING_SENTINEL
+                          : m < MOONHUT_TANK_RUNT_M  ? PING_RUNT
+                          : m < activeFloorM()       ? PING_NEAR
+                          : m > sn->maxValidM        ? PING_FAR
+                                                     : PING_OK;
+    static const char *const verdict[] = {"ok", "TIMEOUT - no pulse at all", "RUNT - trigger crosstalk, not an echo",
+                                          "too near (under the floor)", "too far (over the profile ceiling)",
+                                          "NO TARGET - sensor's fixed no-echo pulse"};
+    LOG_DEBUG("MoonTank ping: raw %u us -> %.3f m : %s", (unsigned)us, (double)m, verdict[cls]);
 
-    if (us == 0 || sentinel)
-        return NAN;
-    if (m < activeFloorM() || m > sn->maxValidM)
-        return NAN;
-    return m;
+    const bool hasM = cls == PING_OK || cls == PING_NEAR || cls == PING_FAR;
+    return PingResult{hasM ? m : NAN, us, cls};
 }
 
 bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread, const char *&why)
@@ -163,6 +174,7 @@ bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread,
 
     if (n == 0) {
         why = "no echo";
+        lastClusters = 0; // not the PREVIOUS burst's count - nc= on the wire must be about this burst
         return false;
     }
 
@@ -289,33 +301,92 @@ void MoonTankModule::measure()
                  ok2 ? "ok" : (reject2 ? reject2 : "?"), lastValid2, MOONHUT_TANK_SAMPLES);
 #endif
 
+    // The burst's evidence, frozen for the verdict, the report and the panel.
+    lastEv = evA;
+    evA.reset();
+
     if (n == 0) {
         timeouts++;
         lastM = NAN;
         consecFails++;
-        LOG_WARN("MoonTank: no echo (%u of %u bursts have failed)", (unsigned)timeouts, (unsigned)bursts);
-        if (!diagnosed && timeouts >= 3) {
-            diagnosed = true; // once per boot - it is noisy and the answer does not change
-            diagnose();
-        }
-        return;
-    }
-
-    if (reject) {
+        LOG_WARN("MoonTank: no echo (%u of %u bursts have failed) - to=%u rd=%u runt=%u", (unsigned)timeouts,
+                 (unsigned)bursts, lastEv.timeouts, lastEv.nears, lastEv.runts);
+    } else if (reject) {
         lastM = NAN;
         consecFails++;
         LOG_WARN("MoonTank: REJECTED %.3f m - %s (spread %.3f m, %u/%u echoes)", median, reject, spread, n,
                  MOONHUT_TANK_SAMPLES);
-        return;
+    } else {
+        acceptReading(median);
     }
 
+    // Verdict and state, for EVERY burst - accepted, rejected or silent. The old early
+    // returns meant a value->NAN transition never reached the repaint gate below either.
+    const BurstVerdict v = judgeBurst(!isnan(lastM));
+    if (v == BURST_BLIND)
+        reject = "ringdown only"; // sensor alive, surface inside the near field
+    else if (v == BURST_SILENT)
+        reject = "no pulse";      // sensor did not answer at all
+    updateState(v);
+
+    // The GPIO diagnostic runs on SILENCE, not on "no number". It used to fire on
+    // `timeouts >= 3`, which a full tank satisfies - CONFIRMED live 2026-09-08 16:04:43:
+    // the pin sweep ran on a full tank and re-moded the sensor's own pins.
+    if (v == BURST_SILENT && !diagnosed && silentRun >= MOONHUT_TANK_STATE_RUN) {
+        diagnosed = true; // once per boot - it is noisy and the answer does not change
+        diagnose();
+    }
+
+    // Live-window ringdown band: accumulate what the near field actually returned.
+    if (liveUntilMs && lastEv.nears) {
+        if (isnan(liveRingLo) || lastEv.nearLo < liveRingLo)
+            liveRingLo = lastEv.nearLo;
+        if (isnan(liveRingHi) || lastEv.nearHi > liveRingHi)
+            liveRingHi = lastEv.nearHi;
+        liveRingN += lastEv.nears;
+    }
+    if (liveUntilMs) {
+        liveTimeouts += lastEv.timeouts + lastEv.runts;
+        livePings += MOONHUT_TANK_SAMPLES;
+    }
+
+#if HAS_SCREEN
+    // Repaint only when the panel would actually look different.
+    //
+    // This used to forceDisplay() on every sample, i.e. every MOONHUT_TANK_POLL_S: 69
+    // repaints in 260 s, measured. With EINK_LIMIT_FASTREFRESH=10 every eleventh is a
+    // full-refresh flash, so the panel's ~1e6-refresh budget would be spent in weeks -
+    // all of it redisplaying millimetres of ultrasonic noise that round to the same
+    // number on screen. Polling stays fast because the READING should be current; the
+    // panel only needs repainting when it would look different.
+    //
+    // `shownState` is the second gate: UNKNOWN->FULL is a NAN->NAN change in the number
+    // and was invisible to the first one.
+    const bool appeared = isnan(shownM) != isnan(lastM);
+    const bool moved = !isnan(lastM) && !isnan(shownM) && fabsf(lastM - shownM) >= MOONHUT_TANK_REDRAW_DELTA_M;
+    const bool changedState = tankState != shownState;
+    if (screen && (appeared || moved || changedState)) {
+        shownM = lastM;
+        shownState = tankState;
+        screen->forceDisplay();
+    }
+#endif
+}
+
+// An accepted burst: the number, the belief, the rate fit, the stall bookkeeping.
+void MoonTankModule::acceptReading(float median)
+{
     lastM = median;
+    if (!isnan(lastGoodM))
+        prevGoodM = lastGoodM;
+    lastGoodM = median;
     // How long the sensor was quiet BEFORE this reading, captured before lastGoodAtMs is
     // overwritten. The cross-burst ring uses it to decide whether its contents are still
     // about the same water.
     const uint32_t gapMs = lastGoodAtMs ? (millis() - lastGoodAtMs) : 0;
     consecFails = 0;
     lastGoodAtMs = millis();
+    lastKnownAtMs = lastGoodAtMs;
     if (stallAnnounced) {
         stallAnnounced = false;
         char ok[96];
@@ -353,23 +424,137 @@ void MoonTankModule::measure()
     // target every ping and the median is just the least-bad guess.
     LOG_INFO("MoonTank: %.3f m  (spread %.3f m, %u/%u echoes, session %.3f-%.3f)", lastM, lastSpreadM, lastValid,
              MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM);
+}
 
-#if HAS_SCREEN
-    // Repaint only when the number on the panel would actually change.
-    //
-    // This used to forceDisplay() on every sample, i.e. every MOONHUT_TANK_POLL_S: 69
-    // repaints in 260 s, measured. With EINK_LIMIT_FASTREFRESH=10 every eleventh is a
-    // full-refresh flash, so the panel's ~1e6-refresh budget would be spent in weeks -
-    // all of it redisplaying millimetres of ultrasonic noise that round to the same
-    // number on screen. Polling stays fast because the READING should be current; the
-    // panel only needs repainting when it would look different.
-    const bool appeared = isnan(shownM) != isnan(lastM);
-    const bool moved = !isnan(lastM) && !isnan(shownM) && fabsf(lastM - shownM) >= MOONHUT_TANK_REDRAW_DELTA_M;
-    if (screen && (appeared || moved)) {
-        shownM = lastM;
-        screen->forceDisplay();
+// --- Blind-vs-fault ----------------------------------------------------------
+
+const char *MoonTankModule::stateName() const
+{
+    switch (tankState) {
+    case TANK_OK: return "ok";
+    case TANK_BLIND_FULL: return "full";
+    case TANK_FAULT: return "fault";
+    default: return "unk";
     }
-#endif
+}
+
+BurstVerdict MoonTankModule::judgeBurst(bool accepted)
+{
+    if (accepted)
+        return BURST_OK;
+    const BurstEvidence &e = lastEv;
+    if (e.allSilent())
+        return BURST_SILENT;
+    const float lo = activeRingLo(), hi = activeRingHi();
+    const bool bandKnown = lo > 0.0f && hi > lo;
+    // PERFECT blind burst: nothing but near-field pings, all inside the measured band,
+    // agreeing. Any timeout, runt, sentinel, far or valid echo makes it MIXED - a burst
+    // that contains two kinds of answer is evidence that the scene is ambiguous.
+    if (bandKnown && e.ok == 0 && e.timeouts == 0 && e.runts == 0 && e.sentinels == 0 && e.fars == 0 &&
+        e.nears >= MOONHUT_TANK_BLIND_MIN_NEAR && e.nearLo >= lo && e.nearHi <= hi &&
+        e.nearSpread() <= MOONHUT_TANK_BLIND_MAX_SPREAD_M)
+        return BURST_BLIND;
+    return BURST_MIXED;
+}
+
+bool MoonTankModule::blindEdgeIsFull()
+{
+    // Uncalibrated: "full" has no geometry, so only the sensor's OWN floor may claim the
+    // surface is in the near field - never a raised one.
+    if (!isCalibrated())
+        return floorM <= 0.0f;
+    return activeFloorM() <= tankOffsetM + MOONHUT_TANK_GEOM_SLACK_M;
+}
+
+// Where was the surface the last time we had a number? Corroboration only, and only
+// ever a VETO: it is unarmed after a boot (no history) or past its TTL.
+const char *MoonTankModule::confidence()
+{
+    if (isnan(lastGoodM) || !lastGoodAtMs)
+        return "boot";
+    if ((millis() - lastGoodAtMs) > (MOONHUT_TANK_CONF_TTL_S * 1000UL))
+        return "stale";
+    const float above = lastGoodM - activeFloorM();
+    if (above <= MOONHUT_TANK_CONF_NEAR_M)
+        return (!isnan(prevGoodM) && prevGoodM - lastGoodM > 0.005f) ? "rise" : "near";
+    if (above >= MOONHUT_TANK_CONF_ODD_M)
+        return "odd";
+    return "none";
+}
+
+void MoonTankModule::updateState(BurstVerdict v)
+{
+    const bool bad = (v == BURST_MIXED || v == BURST_SILENT);
+    badMask = (uint16_t)((badMask << 1) | (bad ? 1u : 0u));
+    const uint16_t window = (uint16_t)((1u << MOONHUT_TANK_BLIND_CLEAN_BURSTS) - 1u);
+
+    TankState next = tankState;
+    switch (v) {
+    case BURST_OK:
+        silentRun = 0;
+        blindRun = 0;
+        next = TANK_OK;
+        break;
+    case BURST_SILENT:
+        blindRun = 0;
+        if (silentRun < 255)
+            silentRun++;
+        // FAULT is tested FIRST and needs only silence: no geometry, no trend, no band.
+        next = silentRun >= MOONHUT_TANK_STATE_RUN ? TANK_FAULT : TANK_UNKNOWN;
+        break;
+    case BURST_BLIND:
+        silentRun = 0;
+        if (blindRun < 255)
+            blindRun++;
+        lastKnownAtMs = millis(); // a full tank is KNOWN, not a stall
+        if (tankState == TANK_BLIND_FULL && blindEdgeIsFull())
+            next = TANK_BLIND_FULL;
+        else if (blindRun >= MOONHUT_TANK_STATE_RUN && (badMask & window) == 0 && blindEdgeIsFull() &&
+                 strcmp(confidence(), "odd") != 0)
+            next = TANK_BLIND_FULL;
+        else
+            next = TANK_UNKNOWN;
+        break;
+    case BURST_MIXED:
+        silentRun = 0;
+        blindRun = 0;
+        next = TANK_UNKNOWN; // one imperfect burst leaves FULL
+        break;
+    }
+    if (next == tankState)
+        return;
+
+    const TankState prev = tankState;
+    tankState = next;
+    LOG_WARN("MoonTank: state %s -> %s (rd=%u to=%u runt=%u ok=%u conf=%s)", prev == TANK_OK ? "ok" :
+             prev == TANK_BLIND_FULL ? "full" : prev == TANK_FAULT ? "fault" : "unk", stateName(), lastEv.nears,
+             lastEv.timeouts, lastEv.runts, lastEv.ok, confidence());
+
+    // Edge-triggered announcements for the two HARD states, and for leaving them. The
+    // regular report carries st= on every line; these exist so a person on the channel
+    // sees the moment, not just the next heartbeat.
+    char a[160];
+    if (next == TANK_BLIND_FULL) {
+        snprintf(a, sizeof(a), "TANK FULL|surface inside the %.2f m blind zone|rd=%u/%u|rdsp=%.0fmm|conf=%s|up=%lus",
+                 (double)activeFloorM(), lastEv.nears, MOONHUT_TANK_SAMPLES, (double)(lastEv.nearSpread() * 1000.0f),
+                 confidence(), (unsigned long)(millis() / 1000));
+        sendLine(a);
+    } else if (next == TANK_FAULT) {
+        snprintf(a, sizeof(a), "TANK FAULT|no pulse from the sensor - LEVEL UNKNOWN|to=%u/%u|runt=%u|fails=%lu|up=%lus",
+                 lastEv.timeouts, MOONHUT_TANK_SAMPLES, lastEv.runts, (unsigned long)consecFails,
+                 (unsigned long)(millis() / 1000));
+        sendLine(a);
+    } else if (prev == TANK_BLIND_FULL && next != TANK_OK) {
+        snprintf(a, sizeof(a), "TANK UNK|left the blind zone without a reading|why=%s|rd=%u|to=%u|up=%lus",
+                 reject ? reject : "?", lastEv.nears, lastEv.timeouts, (unsigned long)(millis() / 1000));
+        sendLine(a);
+    } else if (prev == TANK_FAULT && next != TANK_OK) {
+        snprintf(a, sizeof(a), "TANK UNK|sensor answering again|why=%s|rd=%u|to=%u|up=%lus", reject ? reject : "?",
+                 lastEv.nears, lastEv.timeouts, (unsigned long)(millis() / 1000));
+        sendLine(a);
+    }
+    // FAULT/FULL -> OK needs no extra line: the next report says st=ok, and a stalled
+    // node already sends "TANK OK|reading again".
 }
 
 // Why is there no echo? Guessing cost days on the DS18B20 bus; a diagnostic that
@@ -567,10 +752,13 @@ void MoonTankModule::sendLive()
             snprintf(raw, sizeof(raw), "?");
         else
             snprintf(raw, sizeof(raw), "%.3f", (double)lastRawM);
-        snprintf(line, sizeof(line), "LIVE|d=?|raw=%s|e=%u/%u|why=%s|%lus left", raw, lastValid,
-                 MOONHUT_TANK_SAMPLES, reject ? reject : "no echo", left);
+        // rd= and to= are the aiming payload now: "rd=5/5" at a tank is "you are looking at
+        // water closer than the floor", "to=5/5" is "nothing is answering at all".
+        snprintf(line, sizeof(line), "LIVE|st=%s|d=?|raw=%s|e=%u/%u|rd=%u/%u|to=%u/%u|why=%s|%lus left", stateName(),
+                 raw, lastValid, MOONHUT_TANK_SAMPLES, lastEv.nears, MOONHUT_TANK_SAMPLES,
+                 lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, reject ? reject : "no echo", left);
     } else {
-        snprintf(line, sizeof(line), "LIVE|d=%.3f|sp=%.0fmm|e=%u/%u|%lus left", (double)lastM,
+        snprintf(line, sizeof(line), "LIVE|st=ok|d=%.3f|sp=%.0fmm|e=%u/%u|%lus left", (double)lastM,
                  (double)(lastSpreadM * 1000.0f), lastValid, MOONHUT_TANK_SAMPLES, left);
     }
     sendLine(line);
@@ -676,7 +864,20 @@ void MoonTankModule::serviceLive()
     const uint32_t now = millis();
     if ((int32_t)(now - liveUntilMs) >= 0) {
         liveUntilMs = 0;
-        sendLine("LIVE|off (window expired)");
+        // The ringdown band this window actually saw. With the probe held in the near
+        // field for the window this IS the phase-3 measurement: set tank:ring=lo,hi from
+        // it (with ~20 mm margin), and to=0/N is the proof the transducer is healthy.
+        char off[112];
+        if (liveRingN)
+            snprintf(off, sizeof(off), "LIVE|off|ring band seen lo=%.3f hi=%.3f n=%lu|to=%lu/%lu", (double)liveRingLo,
+                     (double)liveRingHi, (unsigned long)liveRingN, (unsigned long)liveTimeouts,
+                     (unsigned long)livePings);
+        else
+            snprintf(off, sizeof(off), "LIVE|off (window expired)|to=%lu/%lu", (unsigned long)liveTimeouts,
+                     (unsigned long)livePings);
+        sendLine(off);
+        liveRingLo = liveRingHi = NAN;
+        liveRingN = liveTimeouts = livePings = 0;
         LOG_INFO("MoonTank: live mode expired");
         return;
     }
@@ -728,9 +929,18 @@ void MoonTankModule::report(bool force)
             snprintf(raw, sizeof(raw), "?");
         else
             snprintf(raw, sizeof(raw), "%.3f", (double)lastRawM);
-        snprintf(line, sizeof(line), "TANK|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|why=%s|fails=%lu|up=%lus", raw,
-                 (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, reject ? reject : "no echo",
-                 (unsigned long)consecFails, (unsigned long)(millis() / 1000));
+        // st= FIRST, same slot as the value line. rd/to/rdsp/conf are the evidence behind it,
+        // so a "full" or a "fault" can be checked from the mesh rather than believed.
+        char rdsp[12];
+        if (lastEv.nears)
+            snprintf(rdsp, sizeof(rdsp), "%.0f", (double)(lastEv.nearSpread() * 1000.0f));
+        else
+            snprintf(rdsp, sizeof(rdsp), "?");
+        snprintf(line, sizeof(line),
+                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|rdsp=%s|conf=%s|why=%s|fails=%lu|up=%lus",
+                 stateName(), raw, (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, rdsp, confidence(),
+                 reject ? reject : "no echo", (unsigned long)consecFails, (unsigned long)(millis() / 1000));
     } else {
         // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a
         // long enough window - an unknown rate is said out loud rather than sent as 0.000,
@@ -741,9 +951,9 @@ void MoonTankModule::report(bool force)
             snprintf(r, sizeof(r), "?");
         else
             snprintf(r, sizeof(r), "%+.3f", (double)rate);
-        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|min=%.3f|max=%.3f|r=%s|up=%lus", lastM,
-                 lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, sessionMinM, sessionMaxM, r,
-                 (unsigned long)(millis() / 1000));
+        snprintf(line, sizeof(line), "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|min=%.3f|max=%.3f|r=%s|up=%lus",
+                 stateName(), lastM, lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, sessionMinM,
+                 sessionMaxM, r, (unsigned long)(millis() / 1000));
     }
 #ifdef MOONHUT_TANK_DUAL
     // Ranger B rides along on A's report rather than triggering its own: the comparison
@@ -897,6 +1107,12 @@ int32_t MoonTankModule::runOnce()
         LOG_INFO("MoonTank: trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m, dead pulse %u us",
                  (unsigned)sn->trigUs, (unsigned)(sn->echoTimeoutUs / 1000), (double)sn->speedMs,
                  (double)sn->minValidM, (double)sn->maxValidM, (unsigned)sn->deadPulseUs);
+        if (activeRingHi() > activeRingLo() && activeRingLo() > 0.0f)
+            LOG_INFO("MoonTank: ringdown band %.3f-%.3f m (%s) - FULL is claimable below the %.3f m floor",
+                     (double)activeRingLo(), (double)activeRingHi(), ringHiM > ringLoM ? "runtime" : "profile",
+                     (double)activeFloorM());
+        else
+            LOG_WARN("MoonTank: ringdown band UNMEASURED for '%s' - this node can report FAULT but never FULL", sn->name);
     }
 
 #ifdef MOONHUT_TANK_TRIG_SWEEP
@@ -909,9 +1125,10 @@ int32_t MoonTankModule::runOnce()
     // ONE ping, then hand the CPU back. See the header: five back-to-back delay()s
     // starved the button thread and PRG presses inside a burst were never seen.
     if (phase == PHASE_A) {
-        const float m = pingOnce(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, trigUs);
-        if (!isnan(m) && nA < MOONHUT_TANK_SAMPLES)
-            sampA[nA++] = m;
+        const PingResult r = pingOnce(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, trigUs);
+        evA.add(r);
+        if (r.cls == PING_OK && nA < MOONHUT_TANK_SAMPLES)
+            sampA[nA++] = r.m;
         if (++pingIdx < MOONHUT_TANK_SAMPLES)
             return activeSensor()->pingGapMs;
         pingIdx = 0;
@@ -926,9 +1143,9 @@ int32_t MoonTankModule::runOnce()
 
 #ifdef MOONHUT_TANK_DUAL
     if (phase == PHASE_B) {
-        const float m = pingOnce(MOONHUT_TANK_TRIG_PIN2, MOONHUT_TANK_ECHO_PIN2, trigUs);
-        if (!isnan(m) && nB < MOONHUT_TANK_SAMPLES)
-            sampB[nB++] = m;
+        const PingResult r = pingOnce(MOONHUT_TANK_TRIG_PIN2, MOONHUT_TANK_ECHO_PIN2, trigUs);
+        if (r.cls == PING_OK && nB < MOONHUT_TANK_SAMPLES)
+            sampB[nB++] = r.m;
         if (++pingIdx < MOONHUT_TANK_SAMPLES)
             return activeSensor()->pingGapMs;
         pingIdx = 0;
@@ -947,12 +1164,16 @@ int32_t MoonTankModule::runOnce()
     //
     // lastGoodAtMs is 0 until the first good reading, so a node that has NEVER read is
     // measured from boot and alerts on the same timer.
+    //
+    // Measured from lastKnownAtMs, not lastGoodAtMs: a tank that is FULL has no number but
+    // is not stalled, and announcing "no valid reading for 21600s" when the water finally
+    // drops out of the blind zone would be a lie about the last six hours.
     const uint32_t now = millis();
-    if (!stallAnnounced && (now - lastGoodAtMs) > (MOONHUT_TANK_STALL_S * 1000UL)) {
+    if (!stallAnnounced && tankState != TANK_BLIND_FULL && (now - lastKnownAtMs) > (MOONHUT_TANK_STALL_S * 1000UL)) {
         stallAnnounced = true;
         char a[176];
         snprintf(a, sizeof(a), "TANK STALL|no valid reading for %lus|fails=%lu|raw=%.3f|sp=%.3f|why=%s|up=%lus",
-                 (unsigned long)((now - lastGoodAtMs) / 1000), (unsigned long)consecFails, (double)lastRawM,
+                 (unsigned long)((now - lastKnownAtMs) / 1000), (unsigned long)consecFails, (double)lastRawM,
                  (double)lastSpreadM, reject ? reject : "no echo", (unsigned long)(now / 1000));
         sendLine(a);
         LOG_ERROR("MoonTank: STALLED - %lu consecutive failures", (unsigned long)consecFails);
@@ -1024,7 +1245,7 @@ void MoonTankModule::loadCalibration()
     // `tank:height=` goes through atof and has always landed. So parse by hand: space-
     // separated fields, strtof for reals, strtoul for integers, and STOP at the first field
     // that fails so an older, shorter file still loads whatever it has.
-    float h = 0, o = 0, flr = 0, dlt = 0;
+    float h = 0, o = 0, flr = 0, dlt = 0, rlo = 0, rhi = 0;
     unsigned poll = 0, rep = 0, minrep = 0;
     char sname[16] = {0};
     int got = 0;
@@ -1060,8 +1281,22 @@ void MoonTankModule::loadCalibration()
     if (got == 5 && nextu(rep)) got = 6;
     if (got == 6 && nextu(minrep)) got = 7;
     if (got == 7 && nextf(dlt)) got = 8;
-    LOG_INFO("MoonTank: cfg parsed got=%d h=%.4f o=%.4f sensor=%s poll=%u floor=%.4f rep=%u minrep=%u delta=%.4f",
-             got, (double)h, (double)o, sname, poll, (double)flr, rep, minrep, (double)dlt);
+    if (got == 8 && nextf(rlo)) got = 9;
+    if (got == 9 && nextf(rhi)) got = 10;
+    LOG_INFO("MoonTank: cfg parsed got=%d h=%.4f o=%.4f sensor=%s poll=%u floor=%.4f rep=%u minrep=%u delta=%.4f "
+             "ring=%.4f-%.4f",
+             got, (double)h, (double)o, sname, poll, (double)flr, rep, minrep, (double)dlt, (double)rlo, (double)rhi);
+    if (got >= 10) {
+        if ((rlo == 0.0f && rhi == 0.0f) || (rlo > 0.0f && rhi > rlo && rhi <= MOONHUT_TANK_FLOOR_MAX_M)) {
+            ringLoM = rlo;
+            ringHiM = rhi;
+            if (ringHiM > ringLoM)
+                LOG_INFO("MoonTank: ringdown band loaded - %.3f-%.3f m (overrides the profile)", (double)ringLoM,
+                         (double)ringHiM);
+        } else {
+            LOG_WARN("MoonTank: stored ring band %.3f-%.3f is invalid - keeping the profile's", (double)rlo, (double)rhi);
+        }
+    }
     // Only let a STORED height win if it is real. A zero means the file predates
     // calibration (or was written uncalibrated), and clobbering a build default with it is
     // how a node ends up displaying 0 % at a tank that is half full.
@@ -1122,9 +1357,9 @@ void MoonTankModule::saveCalibration()
         return;
     }
     char buf[128];
-    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u %.4f %u %u %.4f", tankHeightM, tankOffsetM,
+    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u %.4f %u %u %.4f %.4f %.4f", tankHeightM, tankOffsetM,
                      activeSensor()->name, (unsigned)pollS, (double)floorM, (unsigned)reportS,
-                     (unsigned)minReportS, (double)reportDeltaM);
+                     (unsigned)minReportS, (double)reportDeltaM, (double)ringLoM, (double)ringHiM);
     f.write((const uint8_t *)buf, n);
     f.close();
     LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m, sensor %s", tankHeightM, tankOffsetM,
@@ -1230,6 +1465,31 @@ const char *MoonTankModule::handleCommand(const char *body)
             snprintf(reply, sizeof(reply), "tank: floor=profile default (%.3f m)", (double)activeSensor()->minValidM);
         return reply;
     }
+    if (strncasecmp(body, "ring=", 5) == 0) {
+        // The ringdown band this unit returns from inside its near field - measured with
+        // a live window (the LIVE|off line prints what was seen), then set here with a
+        // margin. 0,0 restores the profile's band. Persisted.
+        float lo = 0.0f, hi = 0.0f;
+        char *e1 = nullptr;
+        lo = strtof(body + 5, &e1);
+        if (e1 && (*e1 == ',' || *e1 == ' ' || *e1 == '-'))
+            hi = strtof(e1 + 1, nullptr);
+        if (!(lo == 0.0f && hi == 0.0f) && !(lo > 0.0f && hi > lo && hi <= MOONHUT_TANK_FLOOR_MAX_M)) {
+            snprintf(reply, sizeof(reply), "tank: ring must be lo,hi with 0<lo<hi<=%.1f m (0,0 = profile), got %.3f,%.3f",
+                     (double)MOONHUT_TANK_FLOOR_MAX_M, (double)lo, (double)hi);
+            return reply;
+        }
+        ringLoM = lo;
+        ringHiM = hi;
+        saveCalibration();
+        if (activeRingHi() > activeRingLo() && activeRingLo() > 0.0f)
+            snprintf(reply, sizeof(reply), "tank: ring=%.3f-%.3f m (%s). blind bursts inside it can read FULL",
+                     (double)activeRingLo(), (double)activeRingHi(), ringHiM > ringLoM ? "runtime" : "profile");
+        else
+            snprintf(reply, sizeof(reply), "tank: ring=unmeasured for %s - this node can never report FULL",
+                     activeSensor()->name);
+        return reply;
+    }
     if (strncasecmp(body, "live=", 5) == 0) {
         // Aiming aid: broadcast every burst, including the failures, for a bounded window.
         // NOT persisted and NOT resumed after a reboot - see the header.
@@ -1248,6 +1508,8 @@ const char *MoonTankModule::handleCommand(const char *body)
         if (!liveUntilMs)     // millis() wrap landing exactly on 0 would read as "off"
             liveUntilMs = 1;
         nextLiveAtMs = millis();  // first line immediately, so you know it took
+        liveRingLo = liveRingHi = NAN;
+        liveRingN = liveTimeouts = livePings = 0;
         snprintf(reply, sizeof(reply), "tank: live %ld min, every %u s. tank:live=0 to stop", v,
                  (unsigned)MOONHUT_TANK_LIVE_PERIOD_S);
         return reply;
@@ -1319,16 +1581,16 @@ const char *MoonTankModule::handleCommand(const char *body)
             return reply;
         }
         snprintf(reply, sizeof(reply),
-                 "tank: sensor=%s poll=%us floor=%.2f height=%.3f dead=%.3f usable=%.3f d=%.3f "
-                 "level=%.3f %.0f%%",
-                 activeSensor()->name, (unsigned)pollS, (double)activeFloorM(), (double)tankHeightM,
-                 (double)tankOffsetM,
-                 (double)(tankHeightM - tankOffsetM), (double)lastM, (double)levelM(), (double)levelPct());
+                 "tank: st=%s sensor=%s poll=%us floor=%.2f ring=%.2f-%.2f height=%.3f dead=%.3f usable=%.3f "
+                 "d=%.3f level=%.3f %.0f%%",
+                 stateName(), activeSensor()->name, (unsigned)pollS, (double)activeFloorM(), (double)activeRingLo(),
+                 (double)activeRingHi(), (double)tankHeightM, (double)tankOffsetM, (double)(tankHeightM - tankOffsetM),
+                 (double)lastM, (double)levelM(), (double)levelPct());
         return reply;
     }
     snprintf(reply, sizeof(reply),
-             "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, live[=<min>], poll=<s>, "
-             "report=<s>, minreport=<s>, delta=<m>, sensor=<name>, sensors, show, clear");
+             "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, ring=<lo>,<hi>, live[=<min>], "
+             "poll=<s>, report=<s>, minreport=<s>, delta=<m>, sensor=<name>, sensors, show, clear");
     return reply;
 }
 
