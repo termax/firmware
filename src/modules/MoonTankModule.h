@@ -189,6 +189,30 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_AGREE_MIN 3
 #endif
 
+// --- Cluster selection (2026-09-08) ----------------------------------------
+//
+// The median-then-consensus filter above assumes ONE target plus noise. In a narrow tank
+// below ~1.1 m there are TWO: the surface, and the walls the beam is now wide enough to
+// hit. MEASURED with the probe untouched: bursts alternated between 1.29 m (surface) and
+// 0.93 m (wall) and half of them failed consensus outright - including bursts that
+// contained a perfect 8 mm hit on the real surface, discarded because it arrived in bad
+// company. The median of a two-population burst lands on whichever population won 3/5.
+//
+// So: group the sorted pings into clusters (a gap wider than AGREE_M starts a new one),
+// then CHOOSE a cluster rather than take the middle of everything:
+//   1. if the node has a belief about the level (stableM, the cross-burst median), the
+//      cluster nearest it within TRACK_GATE_M - this is what recovers the good ping;
+//   2. else the largest cluster;
+//   3. ties -> the FARTHEST. A downward-looking tank sensor's spurious targets (walls,
+//      floats, inlet streams, the tube lip) are all NEARER than the water. Never the
+//      other way round.
+// The chosen cluster then faces the same MIN_ECHOES / AGREE_MIN gates as before, so a
+// lone ping still cannot become a reading. `nc=` in the report says how many clusters
+// the burst had - two or more is the multi-target diagnosis, on the wire, per burst.
+#ifndef MOONHUT_TANK_TRACK_GATE_M
+#define MOONHUT_TANK_TRACK_GATE_M 0.15f
+#endif
+
 // Runtime OVERRIDE of the profile's near-field floor. 0 = use the profile value.
 //
 // Added 2026-09-07 for tank 1, where a float-switch ball hangs ~0.34 m below the probe -
@@ -557,6 +581,7 @@ class MoonTankModule : public concurrency::OSThread
     uint32_t lastGoodAtMs = 0;
     bool stallAnnounced = false;
     uint8_t lastValid = 0;
+    uint8_t lastClusters = 0;      // how many distinct targets the last burst contained
     float sessionMinM = NAN;
     float sessionMaxM = NAN;
     uint32_t bursts = 0;

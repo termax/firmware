@@ -177,30 +177,49 @@ bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread,
         s[j + 1] = k;
     }
 
-    median = s[n / 2];        // median, not mean: one wild echo must not move it
-    // Spread over the samples that AGREE with the median. The full min-to-max range is
-    // dominated by exactly the outliers the consensus test is there to ignore, so
-    // publishing it as the trust indicator made every good burst look untrustworthy.
-    {
-        float lo = median, hi = median;
-        for (uint8_t i = 0; i < n; i++) {
-            if (fabsf(s[i] - median) > MOONHUT_TANK_AGREE_M)
-                continue;
-            if (s[i] < lo)
-                lo = s[i];
-            if (s[i] > hi)
-                hi = s[i];
+    // Cluster the sorted pings: a gap wider than AGREE_M between neighbours starts a new
+    // cluster. See the header - the median of a two-population burst is a coin toss.
+    uint8_t cstart[MOONHUT_TANK_SAMPLES], csize[MOONHUT_TANK_SAMPLES], nc = 1;
+    cstart[0] = 0;
+    csize[0] = 1;
+    for (uint8_t i = 1; i < n; i++) {
+        if (s[i] - s[i - 1] > MOONHUT_TANK_AGREE_M) {
+            cstart[nc] = i;
+            csize[nc] = 1;
+            nc++;
+        } else {
+            csize[nc - 1]++;
         }
-        spread = hi - lo;
     }
+    lastClusters = nc;
 
-    // Consensus around the median, not min-to-max range. See the header: a single
-    // ringdown sample or one multipath reflection must not veto a burst whose median is
-    // perfectly good.
-    uint8_t agree = 0;
-    for (uint8_t i = 0; i < n; i++)
-        if (fabsf(s[i] - median) <= MOONHUT_TANK_AGREE_M)
-            agree++;
+    // Choose a cluster. Belief first (the cross-burst median, which survives a bad burst),
+    // then size, then distance - farthest wins a tie because everything spurious in a tank
+    // is nearer than the water.
+    const float ref = stableM();
+    int8_t best = -1;
+    float bestOff = 0;
+    if (!isnan(ref)) {
+        for (uint8_t c = 0; c < nc; c++) {
+            const float cm = s[cstart[c] + csize[c] / 2];
+            const float off = fabsf(cm - ref);
+            if (off <= MOONHUT_TANK_TRACK_GATE_M && (best < 0 || off < bestOff)) {
+                best = (int8_t)c;
+                bestOff = off;
+            }
+        }
+    }
+    if (best < 0) {
+        for (uint8_t c = 0; c < nc; c++) {
+            if (best < 0 || csize[c] > csize[best] ||
+                (csize[c] == csize[best] && s[cstart[c]] > s[cstart[best]]))
+                best = (int8_t)c;
+        }
+    }
+    const uint8_t b0 = cstart[best], bn = csize[best];
+    median = s[b0 + bn / 2];              // median OF THE CHOSEN CLUSTER, not of everything
+    spread = s[b0 + bn - 1] - s[b0];      // its range - the trust indicator, now honest
+    const uint8_t agree = bn;             // a cluster IS the set that agrees
 
     if (n < MOONHUT_TANK_MIN_ECHOES)
         why = "too few echoes";
@@ -220,8 +239,8 @@ bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread,
         int p = 0;
         for (uint8_t i = 0; i < n && p < (int)sizeof(dbg) - 12; i++)
             p += snprintf(dbg + p, sizeof(dbg) - p, "%s%.3f", i ? " " : "", (double)s[i]);
-        LOG_WARN("MoonTank: pings [%s] -> %s (%u agreed within %.0f mm of %.3f)", dbg, why, agree,
-                 (double)(MOONHUT_TANK_AGREE_M * 1000.0f), (double)median);
+        LOG_WARN("MoonTank: pings [%s] -> %s (%u clusters; chose %u of them at %.3f%s)", dbg, why, nc, agree,
+                 (double)median, isnan(ref) ? "" : " by belief");
     }
     return why == nullptr;
 }
@@ -702,8 +721,8 @@ void MoonTankModule::report(bool force)
             snprintf(raw, sizeof(raw), "?");
         else
             snprintf(raw, sizeof(raw), "%.3f", (double)lastRawM);
-        snprintf(line, sizeof(line), "TANK|d=?|raw=%s|sp=%.3f|e=%u/%u|why=%s|fails=%lu|up=%lus", raw,
-                 (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, reject ? reject : "no echo",
+        snprintf(line, sizeof(line), "TANK|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|why=%s|fails=%lu|up=%lus", raw,
+                 (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, reject ? reject : "no echo",
                  (unsigned long)consecFails, (unsigned long)(millis() / 1000));
     } else {
         // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a
@@ -715,8 +734,8 @@ void MoonTankModule::report(bool force)
             snprintf(r, sizeof(r), "?");
         else
             snprintf(r, sizeof(r), "%+.3f", (double)rate);
-        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|min=%.3f|max=%.3f|r=%s|up=%lus", lastM,
-                 lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM, r,
+        snprintf(line, sizeof(line), "TANK|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|min=%.3f|max=%.3f|r=%s|up=%lus", lastM,
+                 lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, sessionMinM, sessionMaxM, r,
                  (unsigned long)(millis() / 1000));
     }
 #ifdef MOONHUT_TANK_DUAL
