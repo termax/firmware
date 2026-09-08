@@ -30,13 +30,13 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // part is the transducer still ringing, not a real short-range measurement.
     // Ringdown band 0.20-0.28 m: MEASURED 0.227-0.247 (unit 1, 2026-09-05/06) and
     // 0.246-0.255 (unit 2 on the pipe, 2026-09-08, 204/204 pings), plus margin.
-    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, 0.20f, 0.28f,
+    {"jsn", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, 0.20f, 0.28f, 0.715f, 0.745f,
      "JSN-SR04T V3.3 waterproof, transducer on board"},
 
     // HC-SR04P, the 3.3 V twin-transducer bench yardstick. Same interface and timing as
     // the JSN; NOT waterproof, so bench reference only, never a tank.
     // Ringdown UNMEASURED on this part (0,0): it can never claim FULL until it is.
-    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, 0.0f, 0.0f,
+    {"hcsr04", 50, 25000, 343.0f, 0.30f, 4.5f, 0, 100, false, 0, 0.0f, 0.0f, 0.0f, 0.0f,
      "HC-SR04P 3.3 V bench reference, NOT waterproof"},
 
     // DYP A02 in PWM mode - waterproof bistatic probe, IP67, 3.3-5 V.
@@ -57,7 +57,7 @@ const MoonTankSensor MOONHUT_TANK_SENSORS[] = {
     // The datasheet's ">70 ms period" is a floor for the trigger, not what the module
     // needs to be ready again. Five pings now cost 1.25 s inside a 3 s poll.
     // Ringdown UNMEASURED (0,0) - a bistatic part may not ring at all. Never FULL until measured.
-    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, 5000, 0.0f, 0.0f,
+    {"a02", 50, 60000, 348.0f, 0.05f, 4.5f, 35000, 250, true, 5000, 0.0f, 0.0f, 0.0f, 0.0f,
      "DYP A02 PWM, waterproof bistatic, 3 cm blind zone"},
 };
 const uint8_t MOONHUT_TANK_SENSOR_COUNT = sizeof(MOONHUT_TANK_SENSORS) / sizeof(MOONHUT_TANK_SENSORS[0]);
@@ -146,7 +146,7 @@ PingResult MoonTankModule::pingOnce(uint8_t trigPin, uint8_t echoPin, uint16_t t
     // the tank. Collapsing them into one NAN is why "1 of 5 echoes" was unreadable -
     // it could equally have been a wiring fault, bad aim, or a filter set too tight.
     // One line per ping settles it, and a burst is only five of them every few seconds.
-    const float m = (us * 1e-6f * sn->speedMs) / 2.0f;
+    const float m = (us * 1e-6f * activeSpeedMs()) / 2.0f;
     const bool sentinel = sn->deadPulseUs && us > sn->deadPulseUs - 2000 && us < sn->deadPulseUs + 2000;
     // Order matters: RUNT before NEAR, so trigger crosstalk can never count as a
     // near-field ringdown - that is the one path by which an unplugged sensor could read
@@ -316,8 +316,25 @@ void MoonTankModule::measure()
         consecFails++;
         LOG_WARN("MoonTank: REJECTED %.3f m - %s (spread %.3f m, %u/%u echoes)", median, reject, spread, n,
                  MOONHUT_TANK_SAMPLES);
+    } else if (median >= activeSensor()->noiseLoM && median <= activeSensor()->noiseHiM &&
+               activeSensor()->noiseHiM > 0.0f && cleanRun < MOONHUT_TANK_NOISE_CLEAN_N) {
+        // A tight, well-populated burst at the noise-trip distance is only believed when the
+        // bursts before it were clean. An echo lost to splash or a dead transducer produces
+        // exactly this burst - in company with scatter and rejects, which is what cleanRun sees.
+        lastM = NAN;
+        consecFails++;
+        reject = "noise trip?";
+        LOG_WARN("MoonTank: REJECTED %.3f m - inside the noise-trip band after only %u clean burst(s)", median,
+                 cleanRun);
     } else {
         acceptReading(median);
+    }
+    // Clean = one target, tight. Counted AFTER the decision so a burst has to earn its way in.
+    if (!isnan(lastM) && lastClusters == 1 && spread <= MOONHUT_TANK_AGREE_M / 2.0f) {
+        if (cleanRun < 255)
+            cleanRun++;
+    } else {
+        cleanRun = 0;
     }
 
     // Verdict and state, for EVERY burst - accepted, rejected or silent. The old early
@@ -510,7 +527,12 @@ void MoonTankModule::updateState(BurstVerdict v)
         if (silentRun < 255)
             silentRun++;
         // FAULT is tested FIRST and needs only silence: no geometry, no trend, no band.
-        next = silentRun >= MOONHUT_TANK_STATE_RUN ? TANK_FAULT : TANK_UNKNOWN;
+        if (silentRun >= MOONHUT_TANK_STATE_RUN)
+            next = TANK_FAULT;
+        else if (tankState == TANK_BLIND_FULL && ++badRun < MOONHUT_TANK_FULL_LEAVE_N)
+            next = TANK_BLIND_FULL; // hysteresis: a full tank is not un-full on one odd burst
+        else
+            next = TANK_UNKNOWN;
         break;
     case BURST_BLIND:
         silentRun = 0;
@@ -528,11 +550,20 @@ void MoonTankModule::updateState(BurstVerdict v)
     case BURST_MIXED:
         silentRun = 0;
         blindRun = 0;
-        next = TANK_UNKNOWN; // one imperfect burst leaves FULL
+        // Leaving FULL takes FULL_LEAVE_N imperfect bursts in a row. Seen live: the float ball
+        // drifting through the beam gives one ball ping per minute, and each one used to cost
+        // two packets (UNK, then FULL again). A burst WITH a number still leaves at once.
+        if (tankState == TANK_BLIND_FULL && ++badRun < MOONHUT_TANK_FULL_LEAVE_N)
+            next = TANK_BLIND_FULL;
+        else
+            next = TANK_UNKNOWN;
         break;
     }
+    if (v == BURST_OK || v == BURST_BLIND)
+        badRun = 0;
     if (next == tankState)
         return;
+    badRun = 0;
 
     const TankState prev = tankState;
     tankState = next;
@@ -543,6 +574,15 @@ void MoonTankModule::updateState(BurstVerdict v)
     // Edge-triggered announcements for the two HARD states, and for leaving them. The
     // regular report carries st= on every line; these exist so a person on the channel
     // sees the moment, not just the next heartbeat.
+    // Same edge again within EDGE_MIN_S: log it, do not put it on air.
+    const uint32_t nowMs = millis();
+    const bool onAir = !lastEdgeMs[next] || (nowMs - lastEdgeMs[next]) >= (MOONHUT_TANK_EDGE_MIN_S * 1000UL);
+    if (!onAir) {
+        LOG_INFO("MoonTank: edge %s suppressed on air (last one %lus ago)", stateName(),
+                 (unsigned long)((nowMs - lastEdgeMs[next]) / 1000));
+        return;
+    }
+    lastEdgeMs[next] = nowMs ? nowMs : 1;
     char a[160];
     if (next == TANK_BLIND_FULL) {
         snprintf(a, sizeof(a), "TANK FULL|surface inside the %.2f m blind zone|rd=%u/%u|rdsp=%.0fmm|conf=%s|up=%lus",
@@ -1042,7 +1082,7 @@ void MoonTankModule::serviceScreen(uint32_t now)
                           || !powerStatus->getHasBattery() // nothing to run from anyway
                           || powerStatus->getHasUSB()      // positively told USB is there
                           || powerStatus->getIsCharging(); // can only happen on external power
-    const bool onBattery = !external;
+    const bool onBattery = !external && screenMode != 1;
 #endif
     const bool onUsb = !onBattery;
 
@@ -1117,6 +1157,10 @@ int32_t MoonTankModule::runOnce()
         LOG_INFO("MoonTank: trig %u us, echo wait %u ms, %.0f m/s, valid %.2f-%.2f m, dead pulse %u us",
                  (unsigned)sn->trigUs, (unsigned)(sn->echoTimeoutUs / 1000), (double)sn->speedMs,
                  (double)sn->minValidM, (double)sn->maxValidM, (unsigned)sn->deadPulseUs);
+        if (sosMs > 0.0f)
+            LOG_INFO("MoonTank: speed of sound %.1f m/s (runtime, profile %.1f)", (double)sosMs, (double)sn->speedMs);
+        if (screenMode == 1)
+            LOG_INFO("MoonTank: panel policy: ALWAYS ON (tank:screen=on)");
         if (activeRingHi() > activeRingLo() && activeRingLo() > 0.0f)
             LOG_INFO("MoonTank: ringdown band %.3f-%.3f m (%s) - sub-floor pings >= %.3f m can claim FULL below the %.3f m floor",
                      (double)activeRingLo(), (double)activeRingHi(), ringHiM > ringLoM ? "runtime" : "profile",
@@ -1255,8 +1299,8 @@ void MoonTankModule::loadCalibration()
     // `tank:height=` goes through atof and has always landed. So parse by hand: space-
     // separated fields, strtof for reals, strtoul for integers, and STOP at the first field
     // that fails so an older, shorter file still loads whatever it has.
-    float h = 0, o = 0, flr = 0, dlt = 0, rlo = 0, rhi = 0;
-    unsigned poll = 0, rep = 0, minrep = 0;
+    float h = 0, o = 0, flr = 0, dlt = 0, rlo = 0, rhi = 0, sos = 0;
+    unsigned poll = 0, rep = 0, minrep = 0, scr = 0;
     char sname[16] = {0};
     int got = 0;
     char *p = buf, *end = nullptr;
@@ -1293,6 +1337,16 @@ void MoonTankModule::loadCalibration()
     if (got == 7 && nextf(dlt)) got = 8;
     if (got == 8 && nextf(rlo)) got = 9;
     if (got == 9 && nextf(rhi)) got = 10;
+    if (got == 10 && nextu(scr)) got = 11;
+    if (got == 11 && nextf(sos)) got = 12;
+    if (got >= 11)
+        screenMode = scr == 1 ? 1 : 0;
+    if (got >= 12) {
+        if (sos == 0.0f || (sos >= 300.0f && sos <= 400.0f))
+            sosMs = sos;
+        else
+            LOG_WARN("MoonTank: stored speed of sound %.1f is out of range - keeping the profile's", (double)sos);
+    }
     LOG_INFO("MoonTank: cfg parsed got=%d h=%.4f o=%.4f sensor=%s poll=%u floor=%.4f rep=%u minrep=%u delta=%.4f "
              "ring=%.4f-%.4f",
              got, (double)h, (double)o, sname, poll, (double)flr, rep, minrep, (double)dlt, (double)rlo, (double)rhi);
@@ -1367,9 +1421,10 @@ void MoonTankModule::saveCalibration()
         return;
     }
     char buf[128];
-    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u %.4f %u %u %.4f %.4f %.4f", tankHeightM, tankOffsetM,
-                     activeSensor()->name, (unsigned)pollS, (double)floorM, (unsigned)reportS,
-                     (unsigned)minReportS, (double)reportDeltaM, (double)ringLoM, (double)ringHiM);
+    int n = snprintf(buf, sizeof(buf), "%.4f %.4f %s %u %.4f %u %u %.4f %.4f %.4f %u %.1f", tankHeightM,
+                     tankOffsetM, activeSensor()->name, (unsigned)pollS, (double)floorM, (unsigned)reportS,
+                     (unsigned)minReportS, (double)reportDeltaM, (double)ringLoM, (double)ringHiM,
+                     (unsigned)screenMode, (double)sosMs);
     f.write((const uint8_t *)buf, n);
     f.close();
     LOG_INFO("MoonTank: calibration saved - height %.3f m, dead top %.3f m, sensor %s", tankHeightM, tankOffsetM,
@@ -1473,6 +1528,41 @@ const char *MoonTankModule::handleCommand(const char *body)
                      (double)floorM);
         else
             snprintf(reply, sizeof(reply), "tank: floor=profile default (%.3f m)", (double)activeSensor()->minValidM);
+        return reply;
+    }
+    if (strncasecmp(body, "screen=", 7) == 0) {
+        // Panel policy. "on" = never blank, whatever the power detection says. Needed on the
+        // boxed node: a full cell on a charger is not "charging", and getHasUSB() is not wired
+        // on this board, so the battery policy blanked a mains-fed panel 60 s after boot.
+        const char *v = body + 7;
+        if (strcasecmp(v, "on") == 0 || strcmp(v, "1") == 0)
+            screenMode = 1;
+        else if (strcasecmp(v, "auto") == 0 || strcmp(v, "0") == 0)
+            screenMode = 0;
+        else {
+            snprintf(reply, sizeof(reply), "tank: screen must be on or auto, got '%s'", v);
+            return reply;
+        }
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: screen=%s", screenMode ? "on (never blanks)" : "auto (battery policy)");
+        return reply;
+    }
+    if (strncasecmp(body, "sos=", 4) == 0 || strncasecmp(body, "temp=", 5) == 0) {
+        // Speed of sound: set directly, or from an air temperature (331.3 + 0.606*T). The JSN
+        // profile assumes 343 m/s = 20 C; at 30 C sound is 1.8 % faster and every reading is
+        // that much short - 1 cm near the top of tank 1, ~3 cm at the bottom. 0 = profile.
+        const bool isTemp = strncasecmp(body, "temp=", 5) == 0;
+        float v = atof(body + (isTemp ? 5 : 4));
+        if (isTemp)
+            v = (v == 0.0f) ? 0.0f : 331.3f + 0.606f * v;
+        if (v != 0.0f && (v < 300.0f || v > 400.0f)) {
+            snprintf(reply, sizeof(reply), "tank: speed of sound must be 300-400 m/s (0 = profile), got %.1f", (double)v);
+            return reply;
+        }
+        sosMs = v;
+        saveCalibration();
+        snprintf(reply, sizeof(reply), "tank: speed of sound=%.1f m/s (%s)", (double)activeSpeedMs(),
+                 sosMs > 0.0f ? "runtime" : "profile");
         return reply;
     }
     if (strncasecmp(body, "ring=", 5) == 0) {
@@ -1599,8 +1689,9 @@ const char *MoonTankModule::handleCommand(const char *body)
         return reply;
     }
     snprintf(reply, sizeof(reply),
-             "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, ring=<lo>,<hi>, live[=<min>], "
-             "poll=<s>, report=<s>, minreport=<s>, delta=<m>, sensor=<name>, sensors, show, clear");
+             "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, ring=<lo>,<hi>, screen=on|auto, "
+             "sos=<m/s>|temp=<C>, live[=<min>], poll=<s>, report=<s>, minreport=<s>, delta=<m>, sensor=<name>, "
+             "sensors, show, clear");
     return reply;
 }
 

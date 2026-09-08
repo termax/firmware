@@ -114,6 +114,15 @@ struct MoonTankSensor {
     // FULL. See MOONHUT_TANK_RUNT_M.
     float ringLoM;
     float ringHiM;
+    // NOISE-TRIP band: the fixed distance this part reports when the real echo is LOST
+    // (receiver noise crossing the threshold at one point on the gain ramp). MEASURED on the
+    // JSN 2026-09-08 with the transducer physically unplugged: a tight 0.729 m, 5/5, in 35 %
+    // of pings, plus scatter beyond it - and the SAME 0.73 m on both units, on four days,
+    // whenever splash or bad aim killed the echo. A surface genuinely at 0.73 m reads clean
+    // burst after burst; the artifact never does. So a reading inside this band is only
+    // accepted after MOONHUT_TANK_NOISE_CLEAN_N clean bursts. 0,0 = none known.
+    float noiseLoM;
+    float noiseHiM;
     const char *desc;
 };
 
@@ -301,6 +310,21 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 // float is in the beam, not that the tank is full.
 #ifndef MOONHUT_TANK_GEOM_SLACK_M
 #define MOONHUT_TANK_GEOM_SLACK_M 0.05f
+#endif
+// LEAVING full takes this many consecutive imperfect bursts (entering stays hard). Live,
+// 2026-09-08 19:27-20:50: with the float ball in the beam one stray ball ping knocked FULL to
+// UNKNOWN within seconds, and FULL came back a minute later - every flip a LoRa packet.
+#ifndef MOONHUT_TANK_FULL_LEAVE_N
+#define MOONHUT_TANK_FULL_LEAVE_N 3
+#endif
+// The same edge announcement (FULL / FAULT / UNK) is not repeated on air within this window.
+#ifndef MOONHUT_TANK_EDGE_MIN_S
+#define MOONHUT_TANK_EDGE_MIN_S 600
+#endif
+// Clean bursts (single target, spread <= AGREE_M/2) required before a reading inside the
+// profile's noise-trip band is believed. See MoonTankSensor::noiseLoM.
+#ifndef MOONHUT_TANK_NOISE_CLEAN_N
+#define MOONHUT_TANK_NOISE_CLEAN_N 3
 #endif
 
 // Near-field floor MOVED to the sensor profile (MoonTankSensor::minValidM), because it
@@ -613,6 +637,12 @@ class MoonTankModule : public concurrency::OSThread
     float prevGoodM = NAN;
     uint32_t lastKnownAtMs = 0;   // last time the module KNEW something: a reading, or blind-full
     float ringLoM = 0.0f, ringHiM = 0.0f; // runtime ringdown band; 0,0 = profile. `tank:ring=lo,hi`
+    uint8_t badRun = 0;           // consecutive imperfect bursts while FULL (hysteresis on leaving)
+    uint32_t lastEdgeMs[4] = {};  // per TankState: when its edge line last went on air (0 = never)
+    uint8_t cleanRun = 0;         // consecutive clean bursts (single target, tight) - noise-band gate
+    uint8_t screenMode = 0;       // 0 = auto (battery policy), 1 = always on. `tank:screen=`, persisted
+    float sosMs = 0.0f;           // runtime speed of sound, m/s; 0 = profile. `tank:sos=` / `tank:temp=`
+    float activeSpeedMs() { return sosMs > 0.0f ? sosMs : activeSensor()->speedMs; }
     // Ringdown band actually SEEN while a live window was open - emitted when it closes.
     // This is the phase-3 measurement, for free: aim, watch, and the band prints itself.
     float liveRingLo = NAN, liveRingHi = NAN;
