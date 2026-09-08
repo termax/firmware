@@ -986,10 +986,19 @@ void MoonTankModule::report(bool force)
             snprintf(rdsp, sizeof(rdsp), "%.0f", (double)(lastEv.nearSpread() * 1000.0f));
         else
             snprintf(rdsp, sizeof(rdsp), "?");
+        // The last fitted rate rides along for MOONHUT_TANK_RATE_HOLD_S after the numbers stop,
+        // so a consumer's "empty in ~N h" survives a short dropout (FleetView ask, 2026-09-08).
+        // It is the rate the surface HAD; a fit is never extended across the gap.
+        char r[16];
+        const float rate = levelRateMph();
+        if (!isnan(rate) && lastRateAt && (millis() - lastRateAt) < (MOONHUT_TANK_RATE_HOLD_S * 1000UL))
+            snprintf(r, sizeof(r), "%+.3f", (double)rate);
+        else
+            snprintf(r, sizeof(r), "?");
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|rdsp=%s|conf=%s|why=%s|fails=%lu|up=%lus",
+                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|rdsp=%s|conf=%s|r=%s|why=%s|fails=%lu|up=%lus",
                  stateName(), raw, (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
-                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, rdsp, confidence(),
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, rdsp, confidence(), r,
                  reject ? reject : "no echo", (unsigned long)consecFails, (unsigned long)(millis() / 1000));
     } else {
         // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a

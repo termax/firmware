@@ -477,6 +477,11 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 // The distinction that matters in the log: a node that REBOOTED comes back with a small
 // uptime, a node that STALLED keeps counting up. Without uptime in the line the two are
 // indistinguishable after the fact, which is exactly the hole this closes.
+// How long the last fitted rate keeps riding on no-value reports after the numbers stop.
+#ifndef MOONHUT_TANK_RATE_HOLD_S
+#define MOONHUT_TANK_RATE_HOLD_S 900
+#endif
+
 #ifndef MOONHUT_TANK_STALL_S
 #define MOONHUT_TANK_STALL_S 600
 #endif
