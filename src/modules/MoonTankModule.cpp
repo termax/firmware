@@ -333,7 +333,14 @@ void MoonTankModule::measure()
         stableCount = 0;
         stableHead = 0;
     }
-    pushBurst(lastM);
+    // The belief (stableM) may only learn from SINGLE-target bursts. Seen live 2026-09-08:
+    // a run of wall bursts, each accepted because 3/5 pings agreed among themselves, dragged
+    // stableM onto the wall - and "nearest belief" then chose the wall cluster ("chose 2 of
+    // them at 0.765 by belief"). A burst that contained two targets is evidence that the
+    // scene is ambiguous, not evidence about where the water is. It is still measured,
+    // reported and chosen from; it just cannot teach the belief.
+    if (lastClusters == 1)
+        pushBurst(lastM);
     recordLevel(millis(), lastM);
 
     if (isnan(sessionMinM) || lastM < sessionMinM)
