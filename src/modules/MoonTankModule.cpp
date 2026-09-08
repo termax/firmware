@@ -1002,19 +1002,59 @@ void MoonTankModule::loadCalibration()
     char buf[128] = {0};
     size_t n = f.readBytes(buf, sizeof(buf) - 1);
     f.close();
+    // Print exactly what was on disk. Two sessions of reasoning about why this file loads as
+    // height 0.000 produced two wrong theories; the bytes themselves cannot be argued with.
+    LOG_INFO("MoonTank: cfg file %s = [%s] (%u bytes)", MOONHUT_TANK_CFG_PATH, buf, (unsigned)n);
     if (!n)
         return;
     // Third field added 2026-09-06, fourth (poll seconds) 2026-09-07. sscanf returns the
     // count it actually filled, so a file written by an older build still loads and simply
     // keeps the defaults for the fields it lacks - no migration, no version byte.
-    float h = 0, o = 0;
+    // NOT sscanf. With the file bytes verified correct on the wire -
+    // [2.0000 0.3000 jsn 3 0.0000 15 10 0.0000] - sscanf("%f ...") still yielded height 0.000
+    // across three flashes on two nights. This toolchain's newlib is built without float
+    // scanf support: the format is accepted, the floats never land. atof()/strtof() work -
+    // `tank:height=` goes through atof and has always landed. So parse by hand: space-
+    // separated fields, strtof for reals, strtoul for integers, and STOP at the first field
+    // that fails so an older, shorter file still loads whatever it has.
+    float h = 0, o = 0, flr = 0, dlt = 0;
+    unsigned poll = 0, rep = 0, minrep = 0;
     char sname[16] = {0};
-    unsigned poll = 0;
-    float flr = 0;
-    unsigned rep = 0, minrep = 0;
-    float dlt = 0;
-    const int got = sscanf(buf, "%f %f %15s %u %f %u %u %f", &h, &o, sname, &poll, &flr,
-                           &rep, &minrep, &dlt);
+    int got = 0;
+    char *p = buf, *end = nullptr;
+    auto nextf = [&](float &out) -> bool {
+        while (*p == ' ') p++;
+        if (!*p) return false;
+        out = strtof(p, &end);
+        if (end == p) return false;
+        p = end;
+        return true;
+    };
+    auto nextu = [&](unsigned &out) -> bool {
+        while (*p == ' ') p++;
+        if (!*p) return false;
+        out = (unsigned)strtoul(p, &end, 10);
+        if (end == p) return false;
+        p = end;
+        return true;
+    };
+    auto nexts = [&](char *out, size_t cap) -> bool {
+        while (*p == ' ') p++;
+        size_t i = 0;
+        while (*p && *p != ' ' && i < cap - 1) out[i++] = *p++;
+        out[i] = 0;
+        return i > 0;
+    };
+    if (nextf(h)) got = 1;
+    if (got == 1 && nextf(o)) got = 2;
+    if (got == 2 && nexts(sname, sizeof sname)) got = 3;
+    if (got == 3 && nextu(poll)) got = 4;
+    if (got == 4 && nextf(flr)) got = 5;
+    if (got == 5 && nextu(rep)) got = 6;
+    if (got == 6 && nextu(minrep)) got = 7;
+    if (got == 7 && nextf(dlt)) got = 8;
+    LOG_INFO("MoonTank: cfg parsed got=%d h=%.4f o=%.4f sensor=%s poll=%u floor=%.4f rep=%u minrep=%u delta=%.4f",
+             got, (double)h, (double)o, sname, poll, (double)flr, rep, minrep, (double)dlt);
     // Only let a STORED height win if it is real. A zero means the file predates
     // calibration (or was written uncalibrated), and clobbering a build default with it is
     // how a node ends up displaying 0 % at a tank that is half full.
