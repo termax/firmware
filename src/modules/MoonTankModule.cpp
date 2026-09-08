@@ -268,6 +268,25 @@ void MoonTankModule::measure()
 #else
     const uint16_t trigUs = activeSensor()->trigUs;
 #endif
+    // Second bounce - see MOONHUT_TANK_ECHO2_*. Done here, with the whole burst in hand,
+    // because a single ping cannot know it is a bounce; only its company can say.
+    if (evA.nears >= MOONHUT_TANK_ECHO2_MIN_NEAR && nA > 0) {
+        const float nearMed = (evA.nearLo + evA.nearHi) / 2.0f;
+        uint8_t kept = 0;
+        for (uint8_t i = 0; i < nA; i++) {
+            const float ratio = sampA[i] / nearMed;
+            if (ratio >= MOONHUT_TANK_ECHO2_LO && ratio <= MOONHUT_TANK_ECHO2_HI) {
+                LOG_DEBUG("MoonTank: %.3f m is %.2fx the near-field %.3f m - second bounce, not a target",
+                          (double)sampA[i], (double)ratio, (double)nearMed);
+                evA.echo2++;
+                if (evA.ok)
+                    evA.ok--;
+            } else {
+                sampA[kept++] = sampA[i];
+            }
+        }
+        nA = kept;
+    }
     const bool ok = evaluate(sampA, nA, median, spread, why);
     n = nA;
 
@@ -478,8 +497,10 @@ BurstVerdict MoonTankModule::judgeBurst(bool accepted)
     // shortest genuine ringdown is the proof of life; the runt class catches everything
     // shorter.
     (void)hi;
+    // e.echo2 is deliberately NOT in this test: a second bounce is more near-field evidence.
     if (bandKnown && e.ok == 0 && e.timeouts == 0 && e.runts == 0 && e.sentinels == 0 && e.fars == 0 &&
-        e.nears >= MOONHUT_TANK_BLIND_MIN_NEAR && e.nearLo >= lo && e.nearSpread() <= MOONHUT_TANK_BLIND_MAX_SPREAD_M)
+        e.nears + e.echo2 >= MOONHUT_TANK_BLIND_MIN_NEAR && e.nears >= MOONHUT_TANK_ECHO2_MIN_NEAR - 1 && e.nearLo >= lo &&
+        e.nearSpread() <= MOONHUT_TANK_BLIND_MAX_SPREAD_M)
         return BURST_BLIND;
     return BURST_MIXED;
 }
@@ -996,10 +1017,11 @@ void MoonTankModule::report(bool force)
         else
             snprintf(r, sizeof(r), "?");
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|rdsp=%s|conf=%s|r=%s|why=%s|fails=%lu|up=%lus",
+                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|conf=%s|r=%s|why=%s|fails=%lu|up=%lus",
                  stateName(), raw, (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
-                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, rdsp, confidence(), r,
-                 reject ? reject : "no echo", (unsigned long)consecFails, (unsigned long)(millis() / 1000));
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, rdsp,
+                 confidence(), r, reject ? reject : "no echo", (unsigned long)consecFails,
+                 (unsigned long)(millis() / 1000));
     } else {
         // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a
         // long enough window - an unknown rate is said out loud rather than sent as 0.000,
@@ -1010,8 +1032,13 @@ void MoonTankModule::report(bool force)
             snprintf(r, sizeof(r), "?");
         else
             snprintf(r, sizeof(r), "%+.3f", (double)rate);
-        snprintf(line, sizeof(line), "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|min=%.3f|max=%.3f|r=%s|up=%lus",
-                 stateName(), lastM, lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, sessionMinM,
+        // rd/to/e2 on the VALUE line too. A value that arrived with ringdown beside it is
+        // suspect (zone edge, or a second bounce that slipped the ratio test), and the Pi
+        // could not see that before - the counts only rode on no-value lines.
+        snprintf(line, sizeof(line),
+                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|min=%.3f|max=%.3f|r=%s|up=%lus",
+                 stateName(), lastM, lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, sessionMinM,
                  sessionMaxM, r, (unsigned long)(millis() / 1000));
     }
 #ifdef MOONHUT_TANK_DUAL

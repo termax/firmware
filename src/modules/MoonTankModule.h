@@ -284,6 +284,28 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #ifndef MOONHUT_TANK_BLIND_MIN_NEAR
 #define MOONHUT_TANK_BLIND_MIN_NEAR 4
 #endif
+// SECOND BOUNCE. With the surface inside the near field the direct echo lands in the
+// ringing and is reported as ringdown - but the sound also goes sensor -> water -> sensor ->
+// water -> sensor and comes back as a clean pulse at TWICE the true distance. MEASURED on
+// tank 1, 2026-09-09 01:27-02:50 TH, tank full, surface 0.22-0.245 m: bursts of 3-4 ringdown
+// pings plus 1-2 "valid" echoes at 0.44-0.49 m. Those passed as readings (three of them
+// even made consensus at 0.445 m), kept the FULL verdict from forming for 25 minutes, and
+// taught the Pi a level of 0.488 m that it then used to call the correct FULL a fault.
+//
+// So when a burst is MOSTLY near-field, a valid ping at ECHO2_LO..ECHO2_HI times the
+// near-field median is the second bounce: it leaves the sample set, counts as near-field
+// evidence, and is reported as e2=. A burst with only one or two ringdown pings is left
+// alone - at the zone edge a real surface at 0.32-0.45 m does come with a stray ringdown
+// ping, and that reading must survive.
+#ifndef MOONHUT_TANK_ECHO2_MIN_NEAR
+#define MOONHUT_TANK_ECHO2_MIN_NEAR 3
+#endif
+#ifndef MOONHUT_TANK_ECHO2_LO
+#define MOONHUT_TANK_ECHO2_LO 1.7f
+#endif
+#ifndef MOONHUT_TANK_ECHO2_HI
+#define MOONHUT_TANK_ECHO2_HI 2.3f
+#endif
 #ifndef MOONHUT_TANK_BLIND_MAX_SPREAD_M
 #define MOONHUT_TANK_BLIND_MAX_SPREAD_M 0.020f
 #endif
@@ -524,6 +546,7 @@ struct PingResult {
 // Tally of one burst, by class, plus the extent of the sub-floor pings.
 struct BurstEvidence {
     uint8_t ok = 0, timeouts = 0, runts = 0, nears = 0, fars = 0, sentinels = 0;
+    uint8_t echo2 = 0;   // second-bounce pings reclassified out of `ok` at burst time - see measure()
     float nearLo = NAN, nearHi = NAN;
     void reset() { *this = BurstEvidence(); }
     void add(const PingResult &r)
