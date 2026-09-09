@@ -309,8 +309,13 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #ifndef MOONHUT_TANK_ECHO2_MAX_X
 #define MOONHUT_TANK_ECHO2_MAX_X 2.2f
 #endif
+// 80 mm, the width of the whole ringdown band, not 20. MEASURED 2026-09-09 15:30 TH with the
+// surface ~0.18 m from the face: 9 of 24 all-near-field bursts spread 21-45 mm (the direct
+// echo arriving inside the ring moves its threshold crossing), and at 20 mm each one counted
+// as imperfect, kept the clean window dirty, and FULL never formed on a plainly full tank.
+// Every ping in such a burst is under the floor; scatter among them is still near-field.
 #ifndef MOONHUT_TANK_BLIND_MAX_SPREAD_M
-#define MOONHUT_TANK_BLIND_MAX_SPREAD_M 0.020f
+#define MOONHUT_TANK_BLIND_MAX_SPREAD_M 0.080f
 #endif
 #ifndef MOONHUT_TANK_STATE_RUN
 #define MOONHUT_TANK_STATE_RUN 3
