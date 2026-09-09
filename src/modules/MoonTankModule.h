@@ -292,19 +292,22 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 // even made consensus at 0.445 m), kept the FULL verdict from forming for 25 minutes, and
 // taught the Pi a level of 0.488 m that it then used to call the correct FULL a fault.
 //
-// So when a burst is MOSTLY near-field, a valid ping at ECHO2_LO..ECHO2_HI times the
-// near-field median is the second bounce: it leaves the sample set, counts as near-field
-// evidence, and is reported as e2=. A burst with only one or two ringdown pings is left
-// alone - at the zone edge a real surface at 0.32-0.45 m does come with a stray ringdown
-// ping, and that reading must survive.
+// So when a burst is MOSTLY near-field, a valid ping nearer than ECHO2_MAX_X times the
+// floor is the second bounce: it leaves the sample set, counts as near-field evidence,
+// and is reported as e2=. The test is against the FLOOR, not the ringdown value: the
+// ringdown reads the transducer's fixed ring time (~0.23 m on this part) whatever the true
+// distance is, while the bounce sits at twice the TRUE distance - on 2026-09-09 15:20 TH,
+// surface ~0.18 m, the bounces came back at 0.34-0.38 m, only 1.5x the ringdown, and a
+// ratio test built on the night before (surface 0.23 m, bounce 0.44-0.49 m, ratio ~2)
+// let them through. Geometry: ringdown-majority means the surface is inside the near
+// field (< floor), so its second bounce is < 2 x floor. A burst with only one or two
+// ringdown pings is left alone - at the zone edge a real surface at 0.32-0.45 m does come
+// with a stray ringdown ping, and that reading must survive.
 #ifndef MOONHUT_TANK_ECHO2_MIN_NEAR
 #define MOONHUT_TANK_ECHO2_MIN_NEAR 3
 #endif
-#ifndef MOONHUT_TANK_ECHO2_LO
-#define MOONHUT_TANK_ECHO2_LO 1.7f
-#endif
-#ifndef MOONHUT_TANK_ECHO2_HI
-#define MOONHUT_TANK_ECHO2_HI 2.3f
+#ifndef MOONHUT_TANK_ECHO2_MAX_X
+#define MOONHUT_TANK_ECHO2_MAX_X 2.2f
 #endif
 #ifndef MOONHUT_TANK_BLIND_MAX_SPREAD_M
 #define MOONHUT_TANK_BLIND_MAX_SPREAD_M 0.020f

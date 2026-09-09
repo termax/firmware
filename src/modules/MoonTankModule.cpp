@@ -271,13 +271,12 @@ void MoonTankModule::measure()
     // Second bounce - see MOONHUT_TANK_ECHO2_*. Done here, with the whole burst in hand,
     // because a single ping cannot know it is a bounce; only its company can say.
     if (evA.nears >= MOONHUT_TANK_ECHO2_MIN_NEAR && nA > 0) {
-        const float nearMed = (evA.nearLo + evA.nearHi) / 2.0f;
+        const float maxBounce = MOONHUT_TANK_ECHO2_MAX_X * activeFloorM();
         uint8_t kept = 0;
         for (uint8_t i = 0; i < nA; i++) {
-            const float ratio = sampA[i] / nearMed;
-            if (ratio >= MOONHUT_TANK_ECHO2_LO && ratio <= MOONHUT_TANK_ECHO2_HI) {
-                LOG_DEBUG("MoonTank: %.3f m is %.2fx the near-field %.3f m - second bounce, not a target",
-                          (double)sampA[i], (double)ratio, (double)nearMed);
+            if (sampA[i] < maxBounce) {
+                LOG_DEBUG("MoonTank: %.3f m with %u ringdown pings beside it is under 2x the %.3f m floor - second bounce, not a target",
+                          (double)sampA[i], evA.nears, (double)activeFloorM());
                 evA.echo2++;
                 if (evA.ok)
                     evA.ok--;
