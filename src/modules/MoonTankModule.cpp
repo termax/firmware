@@ -334,6 +334,15 @@ void MoonTankModule::measure()
         consecFails++;
         LOG_WARN("MoonTank: REJECTED %.3f m - %s (spread %.3f m, %u/%u echoes)", median, reject, spread, n,
                  MOONHUT_TANK_SAMPLES);
+    } else if (tankState == TANK_BLIND_FULL && evA.nears >= 1 && median < MOONHUT_TANK_ECHO2_MAX_X * activeFloorM()) {
+        // While FULL, a value under twice the floor that arrived with ringdown beside it is
+        // the second bounce that escaped the ratio test (a single ringdown ping does not
+        // trigger it). It is not allowed to end FULL on its own; three imperfect bursts are.
+        lastM = NAN;
+        consecFails++;
+        reject = "bounce?";
+        LOG_WARN("MoonTank: REJECTED %.3f m - under 2x the floor with %u ringdown ping(s) while FULL: second bounce",
+                 median, evA.nears);
     } else if (median >= activeSensor()->noiseLoM && median <= activeSensor()->noiseHiM &&
                activeSensor()->noiseHiM > 0.0f && cleanRun < MOONHUT_TANK_NOISE_CLEAN_N) {
         // A tight, well-populated burst at the noise-trip distance is only believed when the

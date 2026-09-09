@@ -303,8 +303,10 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 // field (< floor), so its second bounce is < 2 x floor. A burst with only one or two
 // ringdown pings is left alone - at the zone edge a real surface at 0.32-0.45 m does come
 // with a stray ringdown ping, and that reading must survive.
+// 2, not 3: live 15:40 TH a burst of 2 ringdown + 3 bounces at 0.35 m made consensus and
+// dropped FULL to a 97 % reading. Two pings under the floor already say near-field.
 #ifndef MOONHUT_TANK_ECHO2_MIN_NEAR
-#define MOONHUT_TANK_ECHO2_MIN_NEAR 3
+#define MOONHUT_TANK_ECHO2_MIN_NEAR 2
 #endif
 #ifndef MOONHUT_TANK_ECHO2_MAX_X
 #define MOONHUT_TANK_ECHO2_MAX_X 2.2f
