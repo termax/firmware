@@ -1589,16 +1589,20 @@ const char *MoonTankModule::handleCommand(const char *body)
     static char reply[160];
     while (*body == ' ')
         body++;
-    // Remember the verb: the NEXT report carries ack=<verb>, so a lost reply DM (three in a
-    // row, live 2026-09-12) does not leave the sender guessing whether the command took.
+    // Remember the verb for ack= on the next report (a lost reply DM no longer leaves the
+    // sender guessing). Staged here, COMMITTED to lastAck only if a real branch handles it -
+    // an unrecognised body (including the node's own reply, were it ever re-fed) must not ack.
+    char verb[12] = "";
     {
         size_t i = 0;
-        while (body[i] && body[i] != '=' && body[i] != ' ' && i < sizeof(lastAck) - 1) {
-            lastAck[i] = body[i];
+        while (body[i] && body[i] != '=' && body[i] != ' ' && i < sizeof(verb) - 1) {
+            verb[i] = body[i];
             i++;
         }
-        lastAck[i] = 0;
+        verb[i] = 0;
     }
+    auto ackVerb = [&]() { strncpy(lastAck, verb, sizeof(lastAck) - 1); lastAck[sizeof(lastAck) - 1] = 0; };
+    ackVerb();  // provisional; the unknown-command fallback clears it
     if (strncasecmp(body, "sweep", 5) == 0) {
         // Commissioning: the next burst goes out unfiltered as SWEEP|p=... (fleetview A7).
         sweepPending = true;
@@ -1854,8 +1858,9 @@ const char *MoonTankModule::handleCommand(const char *body)
                  (double)lastM, (double)levelM(), (double)levelPct());
         return reply;
     }
+    lastAck[0] = 0;  // not a known verb - do not ack (and never echo one back to ourselves)
     snprintf(reply, sizeof(reply),
-             "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, ring=<lo>,<hi>, screen=on|auto, "
+             "unknown tank command. try height=<m>, offset=<m>, floor=<m>, ring=<lo>,<hi>, screen=on|auto, "
              "sos=<m/s>|temp=<C>, live[=<min>], sweep, poll=<s>, report=<s>, minreport=<s>, delta=<m>, "
              "sensor=<name>, sensors, show, clear");
     return reply;

@@ -83,7 +83,11 @@ ProcessMessage TextMessageModule::handleReceived(const meshtastic_MeshPacket &mp
 #ifdef MOONHUT_TANK
     // "tank:<command>" - calibration, so the node can show a percentage on its own panel.
     // Handled here for the same reason as fridge:, ahead of every screen path.
-    if (moonTankModule && mp.decoded.payload.size > 5 &&
+    // mp.from != our own node: handleCommand's reply also starts with "tank:" and comes back
+    // through handleReceived as a LOCAL packet, so without this guard the node parses its own
+    // reply, answers "unknown command", parses THAT, and loops - which surfaced as ack=unknown
+    // and a self-addressed DM storm. A real command always arrives from another node.
+    if (moonTankModule && mp.from && mp.from != nodeDB->getNodeNum() && mp.decoded.payload.size > 5 &&
         strncasecmp((const char *)mp.decoded.payload.bytes, "tank:", 5) == 0) {
         char body[160];
         size_t n = mp.decoded.payload.size - 5;
