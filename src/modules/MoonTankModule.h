@@ -428,6 +428,27 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #define MOONHUT_TANK_STABLE_WINDOW 5
 #endif
 
+// The node's own rate is only published within this bound. Beyond it the fit is straddling a
+// target switch (live 2026-09-12: -7.8 m/h on a tank that was nearly static), not measuring
+// water. The ring is also reset when the belief it is fed jumps by more than RATE_RESET_M.
+#ifndef MOONHUT_TANK_RATE_MAX_MPH
+#define MOONHUT_TANK_RATE_MAX_MPH 2.0f
+#endif
+#ifndef MOONHUT_TANK_RATE_RESET_M
+#define MOONHUT_TANK_RATE_RESET_M 0.5f
+#endif
+// A cluster whose median is within this ratio band of another cluster's is that cluster's
+// SECOND REFLECTION (sensor->target->sensor->target->sensor). Live 2026-09-10..12: a guide-tube
+// reflector at 0.371 m had a stable, tight twin at 0.742 m for two days. It is FLAGGED (hm=) and
+// loses ties against its fundamental; it is not deleted, because a real target can also sit at
+// twice another's distance (float at 1.08 m, water at 2.16 m) and only history can tell.
+#ifndef MOONHUT_TANK_HARMONIC_LO
+#define MOONHUT_TANK_HARMONIC_LO 1.9f
+#endif
+#ifndef MOONHUT_TANK_HARMONIC_HI
+#define MOONHUT_TANK_HARMONIC_HI 2.1f
+#endif
+
 // Fast-drain alert. DISABLED by default (0) and it should stay that way until this tank's
 // normal draw has been observed: a threshold guessed before the first day of real data is
 // just a source of false alarms, and an alert nobody trusts is worse than no alert.
@@ -692,6 +713,7 @@ class MoonTankModule : public concurrency::OSThread
     bool evaluate(float *s, uint8_t n, float &median, float &spread, const char *&why);
 
     void measure();
+    void formatPings();            // burstPings -> lastPings
     void acceptReading(float median); // the accepted-burst half of measure()
     void diagnose();   // runs after repeated silence: says WHY there is no echo
     void report(bool force);
@@ -785,6 +807,18 @@ class MoonTankModule : public concurrency::OSThread
     bool stallAnnounced = false;
     uint8_t lastValid = 0;
     uint8_t lastClusters = 0;      // how many distinct targets the last burst contained
+    // Every ping of the last burst, in order, as "<m><class>" - the one field that would have
+    // made 2026-09-10..12 a ten-minute diagnosis instead of a two-day one (fleetview handoff
+    // A3): two populations and which one was chosen are visible per burst. Classes: o=ok,
+    // n=near-field/ringdown, b=second bounce, t=timeout, r=runt, f=beyond the profile ceiling,
+    // s=sensor's no-target sentinel.
+    PingResult burstPings[MOONHUT_TANK_SAMPLES] = {};
+    uint8_t burstN = 0;
+    char lastPings[64] = "";
+    float lastHarmonicOfM = NAN;   // the chosen candidate sits at ~2x this other cluster (0 = none)
+    char lastAck[12] = "";         // verb of the last command handled, sent once in the next report
+    bool sweepPending = false;     // tank:sweep - broadcast the next burst unfiltered
+    float lastRateSeedM = NAN;     // what the rate ring was last fed; a >0.5 m jump resets it
     float sessionMinM = NAN;
     float sessionMaxM = NAN;
     uint32_t bursts = 0;

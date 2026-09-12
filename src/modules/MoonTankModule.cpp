@@ -221,22 +221,55 @@ bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread,
             }
         }
     }
+    // Which clusters are a SECOND REFLECTION of another (median at HARMONIC_LO..HI times it)?
+    // See MOONHUT_TANK_HARMONIC_*: flagged and demoted in ties, never deleted.
+    bool harm[MOONHUT_TANK_SAMPLES] = {};
+    float harmOf[MOONHUT_TANK_SAMPLES] = {};
+    for (uint8_t c = 0; c < nc; c++) {
+        const float cm = s[cstart[c] + csize[c] / 2];
+        for (uint8_t k = 0; k < nc; k++) {
+            if (k == c)
+                continue;
+            const float fm = s[cstart[k] + csize[k] / 2];
+            const float ratio = fm > 0.0f ? cm / fm : 0.0f;
+            if (ratio >= MOONHUT_TANK_HARMONIC_LO && ratio <= MOONHUT_TANK_HARMONIC_HI) {
+                harm[c] = true;
+                harmOf[c] = fm;
+            }
+        }
+    }
     if (best < 0) {
         for (uint8_t c = 0; c < nc; c++) {
-            if (best < 0 || csize[c] > csize[best] ||
-                (csize[c] == csize[best] && s[cstart[c]] > s[cstart[best]]))
+            if (best < 0 || csize[c] > csize[best])
                 best = (int8_t)c;
+            else if (csize[c] == csize[best]) {
+                // Tie: a harmonic loses to anything; otherwise the FARTHEST wins, because
+                // everything spurious in a tank (walls, floats, streams, the tube lip) is nearer
+                // than the water.
+                if (harm[best] && !harm[c])
+                    best = (int8_t)c;
+                else if (harm[c] == harm[best] && s[cstart[c]] > s[cstart[best]])
+                    best = (int8_t)c;
+            }
         }
     }
     const uint8_t b0 = cstart[best], bn = csize[best];
     median = s[b0 + bn / 2];              // median OF THE CHOSEN CLUSTER, not of everything
     spread = s[b0 + bn - 1] - s[b0];      // its range - the trust indicator, now honest
     const uint8_t agree = bn;             // a cluster IS the set that agrees
+    lastHarmonicOfM = harm[best] ? harmOf[best] : NAN;
 
-    if (n < MOONHUT_TANK_MIN_ECHOES)
-        why = "too few echoes";
-    else if (agree < MOONHUT_TANK_AGREE_MIN)
-        why = "no consensus";
+    // The reason names the TEST that failed, with its numbers. "no consensus" beside sp=0.000
+    // read as "all five agreed and it still refused" (fleetview handoff A2) - sp is the chosen
+    // cluster's spread; what failed was that only `agree` of `n` echoes were in that cluster.
+    static char whyBuf[40];
+    if (n < MOONHUT_TANK_MIN_ECHOES) {
+        snprintf(whyBuf, sizeof(whyBuf), "too few echoes (%u/%u)", n, MOONHUT_TANK_SAMPLES);
+        why = whyBuf;
+    } else if (agree < MOONHUT_TANK_AGREE_MIN) {
+        snprintf(whyBuf, sizeof(whyBuf), "no consensus (%u/%u agree, %u targets)", agree, n, nc);
+        why = whyBuf;
+    }
 
     // Dump the individual pings when a burst is rejected. "samples disagree" without the
     // samples is the same hole as "d=?" without the raw value: it says something is wrong
@@ -322,6 +355,7 @@ void MoonTankModule::measure()
     // The burst's evidence, frozen for the verdict, the report and the panel.
     lastEv = evA;
     evA.reset();
+    formatPings();
 
     if (n == 0) {
         timeouts++;
@@ -350,7 +384,7 @@ void MoonTankModule::measure()
         // exactly this burst - in company with scatter and rejects, which is what cleanRun sees.
         lastM = NAN;
         consecFails++;
-        reject = "noise trip?";
+        reject = "noise band (needs 3 clean bursts)";
         LOG_WARN("MoonTank: REJECTED %.3f m - inside the noise-trip band after only %u clean burst(s)", median,
                  cleanRun);
     } else {
@@ -468,6 +502,40 @@ void MoonTankModule::acceptReading(float median)
     // target every ping and the median is just the least-bad guess.
     LOG_INFO("MoonTank: %.3f m  (spread %.3f m, %u/%u echoes, session %.3f-%.3f)", lastM, lastSpreadM, lastValid,
              MOONHUT_TANK_SAMPLES, sessionMinM, sessionMaxM);
+}
+
+// Every ping of the burst, in order, with its class - see the header. Second bounces are
+// re-derived here from the same test measure() applied, so the list matches the counts.
+void MoonTankModule::formatPings()
+{
+    int p = 0;
+    lastPings[0] = 0;
+    const bool bounceRule = lastEv.nears >= MOONHUT_TANK_ECHO2_MIN_NEAR;
+    const float maxBounce = MOONHUT_TANK_ECHO2_MAX_X * activeFloorM();
+    for (uint8_t i = 0; i < burstN && p < (int)sizeof(lastPings) - 8; i++) {
+        const PingResult &r = burstPings[i];
+        char cls = '?';
+        switch (r.cls) {
+        case PING_OK: cls = (bounceRule && r.m < maxBounce) ? 'b' : 'o'; break;
+        case PING_NEAR: cls = 'n'; break;
+        case PING_TIMEOUT: cls = 't'; break;
+        case PING_RUNT: cls = 'r'; break;
+        case PING_FAR: cls = 'f'; break;
+        case PING_SENTINEL: cls = 's'; break;
+        }
+        if (r.cls == PING_TIMEOUT || r.cls == PING_RUNT || r.cls == PING_SENTINEL)
+            p += snprintf(lastPings + p, sizeof(lastPings) - p, "%s%c", i ? "," : "", cls);
+        else
+            p += snprintf(lastPings + p, sizeof(lastPings) - p, "%s%.3f%c", i ? "," : "", (double)r.m, cls);
+    }
+    if (sweepPending) {
+        // tank:sweep - one burst, everything, no filtering, for commissioning.
+        sweepPending = false;
+        char line[160];
+        snprintf(line, sizeof(line), "SWEEP|p=%s|nc=%u|rd=%u|to=%u|e2=%u|floor=%.2f|st=%s", lastPings, lastClusters,
+                 lastEv.nears, lastEv.timeouts + lastEv.runts, lastEv.echo2, (double)activeFloorM(), stateName());
+        sendLine(line);
+    }
 }
 
 // --- Blind-vs-fault ----------------------------------------------------------
@@ -823,7 +891,7 @@ void MoonTankModule::sendLine(const char *text)
 // person on the ladder needs to be told which.
 void MoonTankModule::sendLive()
 {
-    char line[96];
+    char line[176];
     const unsigned long left = (unsigned long)((liveUntilMs - millis()) / 1000);
     if (isnan(lastM)) {
         char raw[24];
@@ -833,12 +901,12 @@ void MoonTankModule::sendLive()
             snprintf(raw, sizeof(raw), "%.3f", (double)lastRawM);
         // rd= and to= are the aiming payload now: "rd=5/5" at a tank is "you are looking at
         // water closer than the floor", "to=5/5" is "nothing is answering at all".
-        snprintf(line, sizeof(line), "LIVE|st=%s|d=?|raw=%s|e=%u/%u|rd=%u/%u|to=%u/%u|why=%s|%lus left", stateName(),
+        snprintf(line, sizeof(line), "LIVE|st=%s|d=?|raw=%s|e=%u/%u|rd=%u/%u|to=%u/%u|why=%s|p=%s|%lus left", stateName(),
                  raw, lastValid, MOONHUT_TANK_SAMPLES, lastEv.nears, MOONHUT_TANK_SAMPLES,
-                 lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, reject ? reject : "no echo", left);
+                 lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, reject ? reject : "no echo", lastPings, left);
     } else {
-        snprintf(line, sizeof(line), "LIVE|st=ok|d=%.3f|sp=%.0fmm|e=%u/%u|%lus left", (double)lastM,
-                 (double)(lastSpreadM * 1000.0f), lastValid, MOONHUT_TANK_SAMPLES, left);
+        snprintf(line, sizeof(line), "LIVE|st=ok|d=%.3f|sp=%.0fmm|e=%u/%u|p=%s|%lus left", (double)lastM,
+                 (double)(lastSpreadM * 1000.0f), lastValid, MOONHUT_TANK_SAMPLES, lastPings, left);
     }
     sendLine(line);
 }
@@ -894,6 +962,14 @@ void MoonTankModule::recordLevel(uint32_t now, float metres)
         LOG_INFO("MoonTank: rate fed %.3f m (cross-burst median), not this burst's %.3f m", (double)stable,
                  (double)metres);
     metres = stable;
+    // A belief that jumped RATE_RESET_M is a target switch (artifact -> water, wall -> water),
+    // and a slope fitted across it is a fiction (-7.8 m/h live, 2026-09-12). Start again.
+    if (!isnan(lastRateSeedM) && fabsf(metres - lastRateSeedM) > MOONHUT_TANK_RATE_RESET_M) {
+        LOG_INFO("MoonTank: belief jumped %.3f -> %.3f m - rate window reset", (double)lastRateSeedM, (double)metres);
+        rateCount = 0;
+        rateHead = 0;
+    }
+    lastRateSeedM = metres;
 
     lastRateAt = now;
     rateBuf[rateHead] = {now, metres};
@@ -930,7 +1006,11 @@ float MoonTankModule::levelRateMph() const
     if (denom <= 0)
         return NAN;
     const double slope = (n * sxy - sx * sy) / denom; // metres of DISTANCE per hour
-    return (float)(-slope);                           // negate: distance down = level up
+    const float rate = (float)(-slope);               // negate: distance down = level up
+    // Beyond RATE_MAX the fit is straddling a target switch, not measuring water: say nothing.
+    if (fabsf(rate) > MOONHUT_TANK_RATE_MAX_MPH)
+        return NAN;
+    return rate;
 }
 
 // Called at the end of every burst. Kept out of report() deliberately: report() is
@@ -998,7 +1078,7 @@ void MoonTankModule::report(bool force)
     if (!force && !due && !moved)
         return;
 
-    char line[224]; // room for ranger B's fields when the A/B rig is fitted
+    char line[232]; // the LoRa text payload is 233 bytes; worst line ~200 with p= and ack=
     if (isnan(lastM)) {
         // Carry the rejected median and its spread. "d=?" alone says something is wrong;
         // raw= and sp= say WHAT, which is the difference between diagnosing a boxed node
@@ -1024,12 +1104,19 @@ void MoonTankModule::report(bool force)
             snprintf(r, sizeof(r), "%+.3f", (double)rate);
         else
             snprintf(r, sizeof(r), "?");
+        char hm[16] = "";
+        if (!isnan(lastHarmonicOfM))
+            snprintf(hm, sizeof(hm), "|hm=%.3f", (double)lastHarmonicOfM);
+        char ack[20] = "";
+        if (lastAck[0])
+            snprintf(ack, sizeof(ack), "|ack=%s", lastAck);
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|conf=%s|r=%s|why=%s|fails=%lu|up=%lus",
+                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|conf=%s|r=%s|why=%s|p=%s%s%s|fails=%lu|up=%lus",
                  stateName(), raw, (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
                  MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, rdsp,
-                 confidence(), r, reject ? reject : "no echo", (unsigned long)consecFails,
+                 confidence(), r, reject ? reject : "no echo", lastPings, hm, ack, (unsigned long)consecFails,
                  (unsigned long)(millis() / 1000));
+        lastAck[0] = 0;
     } else {
         // r is LEVEL change in metres/hour: + filling, - draining. "?" until the fit has a
         // long enough window - an unknown rate is said out loud rather than sent as 0.000,
@@ -1043,11 +1130,20 @@ void MoonTankModule::report(bool force)
         // rd/to/e2 on the VALUE line too. A value that arrived with ringdown beside it is
         // suspect (zone edge, or a second bounce that slipped the ratio test), and the Pi
         // could not see that before - the counts only rode on no-value lines.
+        // min/max are the SESSION extremes of accepted readings - a diagnostic, not an accepted
+        // window (it was read as one; fleetview handoff A1). p= is every ping with its class.
+        char hm[16] = "";
+        if (!isnan(lastHarmonicOfM))
+            snprintf(hm, sizeof(hm), "|hm=%.3f", (double)lastHarmonicOfM);
+        char ack[20] = "";
+        if (lastAck[0])
+            snprintf(ack, sizeof(ack), "|ack=%s", lastAck);
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|min=%.3f|max=%.3f|r=%s|up=%lus",
+                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|p=%s%s%s|smin=%.3f|smax=%.3f|r=%s|up=%lus",
                  stateName(), lastM, lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
-                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, sessionMinM,
-                 sessionMaxM, r, (unsigned long)(millis() / 1000));
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, lastPings, hm,
+                 ack, sessionMinM, sessionMaxM, r, (unsigned long)(millis() / 1000));
+        lastAck[0] = 0;
     }
 #ifdef MOONHUT_TANK_DUAL
     // Ranger B rides along on A's report rather than triggering its own: the comparison
@@ -1225,6 +1321,8 @@ int32_t MoonTankModule::runOnce()
     if (phase == PHASE_A) {
         const PingResult r = pingOnce(MOONHUT_TANK_TRIG_PIN, MOONHUT_TANK_ECHO_PIN, trigUs);
         evA.add(r);
+        if (burstN < MOONHUT_TANK_SAMPLES)
+            burstPings[burstN++] = r;
         if (r.cls == PING_OK && nA < MOONHUT_TANK_SAMPLES)
             sampA[nA++] = r.m;
         if (++pingIdx < MOONHUT_TANK_SAMPLES)
@@ -1282,6 +1380,7 @@ int32_t MoonTankModule::runOnce()
     serviceScreen(now);
 
     nA = 0;
+    burstN = 0;
 #ifdef MOONHUT_TANK_DUAL
     nB = 0;
 #endif
@@ -1490,6 +1589,22 @@ const char *MoonTankModule::handleCommand(const char *body)
     static char reply[160];
     while (*body == ' ')
         body++;
+    // Remember the verb: the NEXT report carries ack=<verb>, so a lost reply DM (three in a
+    // row, live 2026-09-12) does not leave the sender guessing whether the command took.
+    {
+        size_t i = 0;
+        while (body[i] && body[i] != '=' && body[i] != ' ' && i < sizeof(lastAck) - 1) {
+            lastAck[i] = body[i];
+            i++;
+        }
+        lastAck[i] = 0;
+    }
+    if (strncasecmp(body, "sweep", 5) == 0) {
+        // Commissioning: the next burst goes out unfiltered as SWEEP|p=... (fleetview A7).
+        sweepPending = true;
+        snprintf(reply, sizeof(reply), "tank: sweep armed - the next burst is broadcast unfiltered (SWEEP|p=...)");
+        return reply;
+    }
 
     if (strncasecmp(body, "height=", 7) == 0) {
         const float v = atof(body + 7);
@@ -1531,10 +1646,17 @@ const char *MoonTankModule::handleCommand(const char *body)
                          isMin ? "minreport" : "report", isMin ? 5 : 10, v);
                 return reply;
             }
-            if (isRep)
+            if (isRep) {
                 reportS = (uint32_t)v;
-            else
+                // A heartbeat below the floor is a no-op nobody sees (live 2026-09-12: report=30
+                // with floor 120 changed nothing). Lower the floor with it, and say so.
+                if (v != 0 && (uint32_t)v < activeMinReportS()) {
+                    minReportS = (uint32_t)v;
+                    strncpy(lastAck, "report+floor", sizeof(lastAck) - 1);
+                }
+            } else {
                 minReportS = (uint32_t)v;
+            }
         } else {
             const float v = atof(arg);
             if (v < 0.0f || v > 5.0f) {
@@ -1734,8 +1856,8 @@ const char *MoonTankModule::handleCommand(const char *body)
     }
     snprintf(reply, sizeof(reply),
              "tank: unknown command. try height=<m>, offset=<m>, floor=<m>, ring=<lo>,<hi>, screen=on|auto, "
-             "sos=<m/s>|temp=<C>, live[=<min>], poll=<s>, report=<s>, minreport=<s>, delta=<m>, sensor=<name>, "
-             "sensors, show, clear");
+             "sos=<m/s>|temp=<C>, live[=<min>], sweep, poll=<s>, report=<s>, minreport=<s>, delta=<m>, "
+             "sensor=<name>, sensors, show, clear");
     return reply;
 }
 
