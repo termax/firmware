@@ -304,12 +304,16 @@ void MoonTankModule::measure()
     // Second bounce - see MOONHUT_TANK_ECHO2_*. Done here, with the whole burst in hand,
     // because a single ping cannot know it is a bounce; only its company can say.
     if (evA.nears >= MOONHUT_TANK_ECHO2_MIN_NEAR && nA > 0) {
-        const float maxBounce = MOONHUT_TANK_ECHO2_MAX_X * activeFloorM();
+        // Suppress only an echo at ~2x the RINGDOWN distance - the genuine harmonic. A far echo
+        // well beyond that band is the water, however many times the transducer rang. See the
+        // header (fleetview 2026-09-14): the count must not decide.
+        const float ringMed = (evA.nearLo + evA.nearHi) / 2.0f;
         uint8_t kept = 0;
         for (uint8_t i = 0; i < nA; i++) {
-            if (sampA[i] < maxBounce) {
-                LOG_DEBUG("MoonTank: %.3f m with %u ringdown pings beside it is under 2x the %.3f m floor - second bounce, not a target",
-                          (double)sampA[i], evA.nears, (double)activeFloorM());
+            const float ratio = ringMed > 0.0f ? sampA[i] / ringMed : 0.0f;
+            if (ratio >= MOONHUT_TANK_ECHO2_HARM_LO && ratio <= MOONHUT_TANK_ECHO2_HARM_HI) {
+                LOG_DEBUG("MoonTank: %.3f m is %.2fx the %.3f m ringdown - second bounce, not a target",
+                          (double)sampA[i], (double)ratio, (double)ringMed);
                 evA.echo2++;
                 if (evA.ok)
                     evA.ok--;
@@ -511,12 +515,14 @@ void MoonTankModule::formatPings()
     int p = 0;
     lastPings[0] = 0;
     const bool bounceRule = lastEv.nears >= MOONHUT_TANK_ECHO2_MIN_NEAR;
-    const float maxBounce = MOONHUT_TANK_ECHO2_MAX_X * activeFloorM();
+    const float ringMed = (lastEv.nearLo + lastEv.nearHi) / 2.0f;
     for (uint8_t i = 0; i < burstN && p < (int)sizeof(lastPings) - 8; i++) {
         const PingResult &r = burstPings[i];
         char cls = '?';
+        const float ratio = (bounceRule && ringMed > 0.0f) ? r.m / ringMed : 0.0f;
+        const bool isBounce = ratio >= MOONHUT_TANK_ECHO2_HARM_LO && ratio <= MOONHUT_TANK_ECHO2_HARM_HI;
         switch (r.cls) {
-        case PING_OK: cls = (bounceRule && r.m < maxBounce) ? 'b' : 'o'; break;
+        case PING_OK: cls = isBounce ? 'b' : 'o'; break;
         case PING_NEAR: cls = 'n'; break;
         case PING_TIMEOUT: cls = 't'; break;
         case PING_RUNT: cls = 'r'; break;
@@ -1095,6 +1101,11 @@ void MoonTankModule::report(bool force)
             snprintf(rdsp, sizeof(rdsp), "%.0f", (double)(lastEv.nearSpread() * 1000.0f));
         else
             snprintf(rdsp, sizeof(rdsp), "?");
+        char ringStr[12];
+        if (lastEv.nears)
+            snprintf(ringStr, sizeof(ringStr), "%.3f", (double)((lastEv.nearLo + lastEv.nearHi) / 2.0f));
+        else
+            snprintf(ringStr, sizeof(ringStr), "?");
         // The last fitted rate rides along for MOONHUT_TANK_RATE_HOLD_S after the numbers stop,
         // so a consumer's "empty in ~N h" survives a short dropout (FleetView ask, 2026-09-08).
         // It is the rate the surface HAD; a fit is never extended across the gap.
@@ -1111,10 +1122,10 @@ void MoonTankModule::report(bool force)
         if (lastAck[0])
             snprintf(ack, sizeof(ack), "|ack=%s", lastAck);
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|conf=%s|r=%s|why=%s|p=%s%s%s|fails=%lu|up=%lus",
+                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|rd_m=%s|conf=%s|r=%s|why=%s|p=%s%s%s|fails=%lu|up=%lus",
                  stateName(), raw, (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
                  MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, rdsp,
-                 confidence(), r, reject ? reject : "no echo", lastPings, hm, ack, (unsigned long)consecFails,
+                 ringStr, confidence(), r, reject ? reject : "no echo", lastPings, hm, ack, (unsigned long)consecFails,
                  (unsigned long)(millis() / 1000));
         lastAck[0] = 0;
     } else {
@@ -1138,10 +1149,15 @@ void MoonTankModule::report(bool force)
         char ack[20] = "";
         if (lastAck[0])
             snprintf(ack, sizeof(ack), "|ack=%s", lastAck);
+        char ringStr2[12];
+        if (lastEv.nears)
+            snprintf(ringStr2, sizeof(ringStr2), "%.3f", (double)((lastEv.nearLo + lastEv.nearHi) / 2.0f));
+        else
+            snprintf(ringStr2, sizeof(ringStr2), "?");
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|p=%s%s%s|smin=%.3f|smax=%.3f|r=%s|up=%lus",
+                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rd_m=%s|p=%s%s%s|smin=%.3f|smax=%.3f|r=%s|up=%lus",
                  stateName(), lastM, lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
-                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, lastPings, hm,
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, ringStr2, lastPings, hm,
                  ack, sessionMinM, sessionMaxM, r, (unsigned long)(millis() / 1000));
         lastAck[0] = 0;
     }

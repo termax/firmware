@@ -308,6 +308,18 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #ifndef MOONHUT_TANK_ECHO2_MIN_NEAR
 #define MOONHUT_TANK_ECHO2_MIN_NEAR 2
 #endif
+// A genuine second bounce sits at ~2x the RINGDOWN distance (sensor-water-sensor-water-sensor),
+// so the test is a harmonic band on the echo's own distance - NOT the ringdown COUNT, and NOT
+// "anything nearer than 2x the floor". fleetview 2026-09-14 evening: on a probe whose ringdown
+// settled to 0.26 m, the floor-relative rule (< 0.66 m) plus the >=2-ringdown gate classed the
+// real water at 0.52-0.65 m as a bounce and threw away 158 of 168 bursts that carried it. The
+// ringdown count is about the transducer; the far echo is about the water; they are independent.
+#ifndef MOONHUT_TANK_ECHO2_HARM_LO
+#define MOONHUT_TANK_ECHO2_HARM_LO 1.9f
+#endif
+#ifndef MOONHUT_TANK_ECHO2_HARM_HI
+#define MOONHUT_TANK_ECHO2_HARM_HI 2.1f
+#endif
 #ifndef MOONHUT_TANK_ECHO2_MAX_X
 #define MOONHUT_TANK_ECHO2_MAX_X 2.2f
 #endif
