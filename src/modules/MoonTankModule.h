@@ -828,7 +828,7 @@ class MoonTankModule : public concurrency::OSThread
     uint8_t burstN = 0;
     char lastPings[64] = "";
     float lastHarmonicOfM = NAN;   // the chosen candidate sits at ~2x this other cluster (0 = none)
-    char lastAck[12] = "";         // verb of the last command handled, sent once in the next report
+    char lastAck[16] = "";         // verb of the last command handled, sent once in the next report ("report+floor" is 12)
     bool sweepPending = false;     // tank:sweep - broadcast the next burst unfiltered
     float lastRateSeedM = NAN;     // what the rate ring was last fed; a >0.5 m jump resets it
     float sessionMinM = NAN;

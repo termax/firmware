@@ -1673,6 +1673,7 @@ const char *MoonTankModule::handleCommand(const char *body)
                 if (v != 0 && (uint32_t)v < activeMinReportS()) {
                     minReportS = (uint32_t)v;
                     strncpy(lastAck, "report+floor", sizeof(lastAck) - 1);
+                    lastAck[sizeof(lastAck) - 1] = 0;
                 }
             } else {
                 minReportS = (uint32_t)v;
