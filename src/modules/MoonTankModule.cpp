@@ -171,7 +171,6 @@ bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread,
     why = nullptr;
     median = NAN;
     spread = NAN;
-    lastClustersStr[0] = 0;
 
     if (n == 0) {
         why = "no echo";
@@ -205,20 +204,6 @@ bool MoonTankModule::evaluate(float *s, uint8_t n, float &median, float &spread,
         }
     }
     lastClusters = nc;
-
-    // Cluster summary on the wire (see the header). Median x count per cluster, all of them,
-    // whether or not this burst is accepted - a rejected two-target burst is exactly when the
-    // gateway needs to see both targets. The node still picks ONE below for its own d= and
-    // panel; the gateway may override using this and its history.
-    {
-        int q = 0;
-        lastClustersStr[0] = 0;
-        for (uint8_t c = 0; c < nc && q < (int)sizeof(lastClustersStr) - 12; c++) {
-            const float cm = s[cstart[c] + csize[c] / 2];
-            q += snprintf(lastClustersStr + q, sizeof(lastClustersStr) - q, "%s%.3fx%u", c ? "," : "", (double)cm,
-                          csize[c]);
-        }
-    }
 
     // Choose a cluster. Belief first (the cross-burst median, which survives a bad burst),
     // then size, then distance - farthest wins a tie because everything spurious in a tank
@@ -1126,10 +1111,10 @@ void MoonTankModule::report(bool force)
         if (lastAck[0])
             snprintf(ack, sizeof(ack), "|ack=%s", lastAck);
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|conf=%s|r=%s|why=%s|cl=%s%s%s|fails=%lu|up=%lus",
+                 "TANK|st=%s|d=?|raw=%s|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|rdsp=%s|conf=%s|r=%s|why=%s|p=%s%s%s|fails=%lu|up=%lus",
                  stateName(), raw, (double)lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
                  MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, rdsp,
-                 confidence(), r, reject ? reject : "no echo", lastClustersStr, hm, ack, (unsigned long)consecFails,
+                 confidence(), r, reject ? reject : "no echo", lastPings, hm, ack, (unsigned long)consecFails,
                  (unsigned long)(millis() / 1000));
         lastAck[0] = 0;
     } else {
@@ -1154,10 +1139,10 @@ void MoonTankModule::report(bool force)
         if (lastAck[0])
             snprintf(ack, sizeof(ack), "|ack=%s", lastAck);
         snprintf(line, sizeof(line),
-                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|cl=%s%s%s|smin=%.3f|smax=%.3f|r=%s|up=%lus",
+                 "TANK|st=%s|d=%.3f|sp=%.3f|e=%u/%u|nc=%u|rd=%u/%u|to=%u/%u|e2=%u|p=%s%s%s|smin=%.3f|smax=%.3f|r=%s|up=%lus",
                  stateName(), lastM, lastSpreadM, lastValid, MOONHUT_TANK_SAMPLES, lastClusters, lastEv.nears,
-                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, lastClustersStr,
-                 hm, ack, sessionMinM, sessionMaxM, r, (unsigned long)(millis() / 1000));
+                 MOONHUT_TANK_SAMPLES, lastEv.timeouts + lastEv.runts, MOONHUT_TANK_SAMPLES, lastEv.echo2, lastPings, hm,
+                 ack, sessionMinM, sessionMaxM, r, (unsigned long)(millis() / 1000));
         lastAck[0] = 0;
     }
 #ifdef MOONHUT_TANK_DUAL

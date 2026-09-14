@@ -815,14 +815,6 @@ class MoonTankModule : public concurrency::OSThread
     PingResult burstPings[MOONHUT_TANK_SAMPLES] = {};
     uint8_t burstN = 0;
     char lastPings[64] = "";
-    // Every cluster of the last burst as "<median>x<count>", e.g. "0.378x4,0.761x1". Complete
-    // and compact where the per-ping list (lastPings, 72-char capped) silently clips a target
-    // in a multi-population burst - fleetview handoff 2026-09-14, the pipe-wall-deposit case:
-    // 4 pings agree on a deposit at 0.378, one weak ping on the water at 0.76, and the node's
-    // consensus can only pick one. This puts BOTH on the wire so the gateway - which has the
-    // history to tell what moves from what does not - chooses, and never loses a target to
-    // truncation.
-    char lastClustersStr[72] = "";
     float lastHarmonicOfM = NAN;   // the chosen candidate sits at ~2x this other cluster (0 = none)
     char lastAck[12] = "";         // verb of the last command handled, sent once in the next report
     bool sweepPending = false;     // tank:sweep - broadcast the next burst unfiltered
