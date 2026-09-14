@@ -173,6 +173,14 @@ extern const uint8_t MOONHUT_TANK_SENSOR_COUNT;
 #ifndef MOONHUT_TANK_SAMPLES
 #define MOONHUT_TANK_SAMPLES 5
 #endif
+// Upper bound on the runtime ping count (tank:pings=). Arrays are sized to this; the live count
+// is `sampleN`, default MOONHUT_TANK_SAMPLES. 10 keeps the worst-case report line under the
+// 233-byte LoRa text payload with p= present. fleetview 2026-09-14: on a probe where the water
+// speaks once in five, more shots per burst roughly double the chance of catching it, for no
+// extra airtime - only the summary is sent.
+#ifndef MOONHUT_TANK_SAMPLES_MAX
+#define MOONHUT_TANK_SAMPLES_MAX 10
+#endif
 
 // A burst must return at least this many echoes to count. Below it there is no
 // median to speak of - a "median" of one sample is a single unverified ping wearing
@@ -771,10 +779,10 @@ class MoonTankModule : public concurrency::OSThread
     enum SamplePhase : uint8_t { PHASE_A = 0, PHASE_B = 1, PHASE_EVAL = 2 };
     SamplePhase phase = PHASE_A;
     uint8_t pingIdx = 0;
-    float sampA[MOONHUT_TANK_SAMPLES] = {};
+    float sampA[MOONHUT_TANK_SAMPLES_MAX] = {};
     uint8_t nA = 0;
 #ifdef MOONHUT_TANK_DUAL
-    float sampB[MOONHUT_TANK_SAMPLES] = {};
+    float sampB[MOONHUT_TANK_SAMPLES_MAX] = {};
     uint8_t nB = 0;
 #endif
 
@@ -824,9 +832,10 @@ class MoonTankModule : public concurrency::OSThread
     // A3): two populations and which one was chosen are visible per burst. Classes: o=ok,
     // n=near-field/ringdown, b=second bounce, t=timeout, r=runt, f=beyond the profile ceiling,
     // s=sensor's no-target sentinel.
-    PingResult burstPings[MOONHUT_TANK_SAMPLES] = {};
+    PingResult burstPings[MOONHUT_TANK_SAMPLES_MAX] = {};
     uint8_t burstN = 0;
-    char lastPings[64] = "";
+    uint8_t sampleN = MOONHUT_TANK_SAMPLES; // live pings/burst, 3..MAX, tank:pings=, persisted
+    char lastPings[96] = "";  // up to MAX pings x ~9 chars
     float lastHarmonicOfM = NAN;   // the chosen candidate sits at ~2x this other cluster (0 = none)
     char lastAck[16] = "";         // verb of the last command handled, sent once in the next report ("report+floor" is 12)
     bool sweepPending = false;     // tank:sweep - broadcast the next burst unfiltered
