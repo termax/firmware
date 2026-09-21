@@ -5,6 +5,7 @@
 #include "GPSStatus.h"
 #include "MeshService.h"
 #include "NodeDB.h"
+#include "PowerStatus.h"
 #include "airtime.h"
 #include "gps/GPS.h"
 #include "gps/RTC.h"
@@ -207,12 +208,24 @@ void MoonTrackModule::powerTick()
         hadFirstFix = true;
         LOG_INFO("MoonTrack: first GPS fix since boot");
     }
+    // 2026-09-22: Samui->Isan by car, tracker on the car's USB the whole way, and it still
+    // lost the ferry plus 634 km of Saturday. Ten minutes in the ferry queue parked it,
+    // parked = GPS fully off, and the cold-start peeks below cannot fix from a moving car
+    // (the screen kept showing the stale lock the whole time, so it LOOKED fine). Parking
+    // exists only to save battery; on external power there is nothing to save. Never park
+    // while plugged in, and if we are parked when the plug arrives, ride at once.
+    bool external = powerStatus && powerStatus->getHasUSB();
+    if (external && mode != RIDING) {
+        LOG_INFO("MoonTrack: external power -> RIDING (no parking while plugged in)");
+        toRiding();
+        return;
+    }
     switch (mode) {
     case RIDING:
         // 2026-07-13: an indoor boot burned the whole RIDING window fixless, then moving
         // peeks (cold GPS + Doppler) failed all trip -> nothing recorded. Until the GPS
         // proves it can fix, keep hunting instead of parking (capped for battery).
-        if (lastMoveMs && (millis() - lastMoveMs) > PARK_AFTER_MS) {
+        if (!external && lastMoveMs && (millis() - lastMoveMs) > PARK_AFTER_MS) {
             if (hadFirstFix || millis() > FIRSTFIX_HUNT_MS)
                 toParked();
         }
@@ -267,7 +280,12 @@ void MoonTrackModule::powerTick()
     }
     case PEEKING: {
         bool timeout = (millis() - peekStartMs) > PEEK_TIMEOUT_MS; // full window: cold starts need it (softsleep reverted)
-        if (gpsStatus && gpsStatus->getHasLock()) {
+        // Only a fix produced DURING this peek counts. gps->disable() clears nothing, so
+        // gpsStatus still says "locked, at the park spot" from before the GPS was cut;
+        // that stale lock used to close the peek on its first tick ("solid fix, still
+        // parked") before the receiver had any chance to acquire (found 2026-09-22).
+        bool freshFix = gpsStatus && gpsStatus->getHasLock() && (int32_t)(gpsStatus->getLastFixMillis() - peekStartMs) >= 0;
+        if (freshFix) {
             lastLockMs = millis();
             double dLat = (gpsStatus->getLatitude() - parkLat) * 1e-7 * 111320.0;
             double dLon = (gpsStatus->getLongitude() - parkLon) * 1e-7 * 111320.0 *
