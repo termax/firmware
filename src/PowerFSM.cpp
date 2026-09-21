@@ -55,7 +55,16 @@ static bool isPowered()
         3) On some boards we don't have the power management chip (like AXPxxxx) so we use EXT_PWR_DETECT GPIO pin to detect
        external power source (see `isVbusIn()` in `Power.cpp`)
     */
+#ifdef MOONHUT_TRACKER
+    // 2026-09-22: with is_power_saving set this always said "not powered", so the tracker never
+    // used the POWER state and light-slept on the car's USB the whole Samui->Isan drive - the
+    // tracker thread then runs only in the short wake windows. Power saving is for the
+    // battery; on external power stay fully awake (POWER has no path into light sleep).
+    (void)isPowerSavingMode;
+    return powerStatus && (!powerStatus->getHasBattery() || powerStatus->getHasUSB());
+#else
     return !isPowerSavingMode && powerStatus && (!powerStatus->getHasBattery() || powerStatus->getHasUSB());
+#endif
 }
 
 static void sdsEnter()
