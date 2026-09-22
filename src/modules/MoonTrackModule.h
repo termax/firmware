@@ -1,5 +1,6 @@
 #pragma once
 #ifdef MOONHUT_TRACKER
+#include "Observer.h"
 #include "SinglePortModule.h"
 #include "concurrency/OSThread.h"
 #include <vector>
@@ -66,7 +67,10 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
 
     // Parked/riding power state machine (P5): parked = GPS off + periodic peek.
     // Light sleep comes from provisioning (is_power_saving=true, role CLIENT).
-    enum PowerMode { RIDING, PARKED, PEEKING };
+    // RESERVE (2026-09-22): battery at/below RESERVE_PCT with no external power -> GPS off, no
+    // peeks, light sleep allowed. Left only by external power (which is also the only way the
+    // cell can charge). Keeps the cell from being run flat by tracking.
+    enum PowerMode { RIDING, PARKED, PEEKING, RESERVE };
     PowerMode mode = RIDING;
     bool hadFirstFix = false; // no parking before the GPS proves it can fix (2026-07-13)
     uint32_t lastMoveMs = 0;
@@ -86,6 +90,12 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     void powerTick();
     void toRiding();
     void toParked();
+    void toReserve();
+    bool homeNear();
+    int preflightSleepCb(void *unused); // veto light sleep while RIDING/PEEKING (battery only matters)
+    CallbackObserver<MoonTrackModule, void *> preflightSleepObserver =
+        CallbackObserver<MoonTrackModule, void *>(this, &MoonTrackModule::preflightSleepCb);
+    uint8_t lowBattTicks = 0; // consecutive ticks at/below RESERVE_PCT on battery (TX sag guard)
     void sendHeartbeat();
 };
 

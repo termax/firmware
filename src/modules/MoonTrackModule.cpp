@@ -7,6 +7,7 @@
 #include "NodeDB.h"
 #include "PowerStatus.h"
 #include "airtime.h"
+#include "sleep.h"
 #include "gps/GPS.h"
 #include "gps/RTC.h"
 #include <cmath>
@@ -46,11 +47,18 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define PEEK_TIMEOUT_MS (180 * 1000UL)    // give up waiting for a fix
 #define UNPARK_DIST_M 25.0                // moved this far from parking spot -> riding
 #define UNPARK_CONFIRM_MS (20 * 1000UL)   // second fix this much later must agree
+// Battery hardening (2026-09-22, after the Samui->Isan trip):
+#define RESERVE_PCT 50                     // on battery at/below this -> RESERVE (GPS off, sleep freely)
+#define RESERVE_TICKS 3                    // ...seen on this many consecutive 15 s ticks (a LoRa TX sag is one)
+#define AWAY_PEEK_MAX_MS (30 * 60 * 1000UL) // parked AWAY from home: peek ladder tops out here, not 60 min -
+                                           // there is no RF departure detection away, only the peeks
+#define HOME_RECENT_S (4 * 3600UL)         // gateway heard (any packet) within this = "at home"
 
 MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
 {
     loadState();
+    preflightSleepObserver.observe(&preflightSleep);
     lastMoveMs = millis(); // arm the park timer at boot — 0 meant "never park until first move"
     LOG_INFO("MoonTrack: log=%u bytes, synced=%u", (unsigned)logSize(), (unsigned)synced);
 }
@@ -191,6 +199,36 @@ void MoonTrackModule::toParked()
     LOG_INFO("MoonTrack: PARKED (gwSnr %.1f)", parkGwSnr);
 }
 
+void MoonTrackModule::toReserve()
+{
+    if (gps)
+        gps->disable();
+    mode = RESERVE;
+    LOG_INFO("MoonTrack: RESERVE (battery %u%% <= %d%%, no external power) - GPS off until plugged in",
+             powerStatus ? powerStatus->getBatteryChargePercent() : 0, RESERVE_PCT);
+}
+
+bool MoonTrackModule::homeNear()
+{
+    // "At home" = the gateway spoke to us on our port recently (gwSeenMs), OR any packet from it
+    // reached the nodedb within HOME_RECENT_S (its own nodeinfo/telemetry are radio-originated and
+    // do update last_heard; only API-originated relays do not).
+    if (gatewayHeard())
+        return true;
+    const meshtastic_NodeInfoLite *gw = nodeDB ? nodeDB->getMeshNode(GATEWAY_NODE) : nullptr;
+    uint32_t now = getValidTime(RTCQualityDevice, false);
+    return gw && gw->last_heard && now && (now - gw->last_heard) < HOME_RECENT_S;
+}
+
+int MoonTrackModule::preflightSleepCb(void *unused)
+{
+    // Light sleep stops every thread, this one included: a RIDING tracker in light sleep records
+    // only in the 10 s wake windows and a PEEKING one never gets its 180 s of GPS. On external
+    // power the FSM never sleeps anyway (POWER state); on battery, veto sleep exactly while the
+    // GPS is meant to be on. PARKED and RESERVE sleep freely - that is where the battery is saved.
+    return (mode == RIDING || mode == PEEKING) ? 1 : 0;
+}
+
 void MoonTrackModule::sendHeartbeat()
 {
     // Theft canary: tiny port-260 beacon each parked peek; silence = jammed/gone
@@ -217,10 +255,28 @@ void MoonTrackModule::powerTick()
     bool external = powerStatus && powerStatus->getHasUSB();
     if (external && mode != RIDING) {
         LOG_INFO("MoonTrack: external power -> RIDING (no parking while plugged in)");
+        lowBattTicks = 0;
         toRiding();
         return;
     }
+    // Battery reserve: never run the cell flat by tracking. Below RESERVE_PCT on battery, with the
+    // reading held for RESERVE_TICKS ticks so one LoRa TX sag cannot trip it, drop to RESERVE.
+    // Only external power (the only thing that can charge the cell) leaves it - handled above.
+    bool onBattery = !external && powerStatus && powerStatus->getHasBattery();
+    if (onBattery && powerStatus->getBatteryChargePercent() <= RESERVE_PCT) {
+        if (lowBattTicks < 255)
+            lowBattTicks++;
+    } else {
+        lowBattTicks = 0;
+    }
+    if (mode != RESERVE && lowBattTicks >= RESERVE_TICKS) {
+        toReserve();
+        return;
+    }
     switch (mode) {
+    case RESERVE:
+        break; // GPS off, sleeping; leaves only via external power
+
     case RIDING:
         // 2026-07-13: an indoor boot burned the whole RIDING window fixless, then moving
         // peeks (cold GPS + Doppler) failed all trip -> nothing recorded. Until the GPS
@@ -265,6 +321,8 @@ void MoonTrackModule::powerTick()
         if (uneventfulPeeks >= 7) cadence = 60 * 60 * 1000UL;
         else if (uneventfulPeeks >= 5) cadence = 30 * 60 * 1000UL;
         else if (uneventfulPeeks >= 3) cadence = 15 * 60 * 1000UL;
+        if (cadence > AWAY_PEEK_MAX_MS && !homeNear())
+            cadence = AWAY_PEEK_MAX_MS; // away, the peeks are the only departure detection we have
         if (rfShift || (millis() - parkedCycleMs) > cadence) {
             if (rfShift) {
                 if (gw)
