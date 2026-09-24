@@ -96,6 +96,18 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     CallbackObserver<MoonTrackModule, void *> preflightSleepObserver =
         CallbackObserver<MoonTrackModule, void *>(this, &MoonTrackModule::preflightSleepCb);
     uint8_t lowBattTicks = 0; // consecutive ticks at/below RESERVE_PCT on battery (TX sag guard)
+    // External power on a Heltec V4 (2026-09-24, the Udon ride that never recorded): the board
+    // has no VBUS sense, so the core's getHasUSB() is just "cell above 4.20 V" - true only with a
+    // FULL cell, false for the whole of a charge. A charger is recognised instead by the cell
+    // CLIMBING: median of the newest 4 ticks vs the 4 ticks EXT_TREND_WINDOW earlier (10 min).
+    static const uint8_t MV_HIST_N = 44;   // 11 min of 15 s ticks
+    int16_t mvHist[MV_HIST_N] = {0};
+    uint8_t mvHead = 0, mvCount = 0;
+    bool extByTrend = false;               // set on a rise, cleared once the cell stops climbing
+    uint32_t loadChangeMs = 0;             // last GPS on/off; the trend ignores the step transient
+    void trendTick();
+    bool externalPower();                  // getHasUSB() || extByTrend
+    void noteLoadStep() { loadChangeMs = millis(); }
     void sendHeartbeat();
 };
 

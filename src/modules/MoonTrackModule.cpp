@@ -53,6 +53,16 @@ MoonTrackModule *moonTrackModule = nullptr;
 #define AWAY_PEEK_MAX_MS (30 * 60 * 1000UL) // parked AWAY from home: peek ladder tops out here, not 60 min -
                                            // there is no RF departure detection away, only the peeks
 #define HOME_RECENT_S (4 * 3600UL)         // gateway heard (any packet) within this = "at home"
+// Charger-by-trend (2026-09-24). Measured on the car USB at 35-50 %: +140 mV in 31 min (~45 mV
+// per 10 min); a discharge under GPS load runs -10..-30 mV per 10 min; the relaxation step when
+// the GPS load drops is a one-off +12..30 mV. So: +40 mV over a 10 min window = a charger.
+#define EXT_TREND_WINDOW 40                  // ticks of 15 s = 10 min
+#define EXT_TREND_RISE_MV 40                 // rise over the window that means "being charged"
+#define EXT_TREND_FLAT_MV 10                 // no longer climbing at least this much = charger gone
+                                             // (a full cell on a charger plateaus, but then getHasUSB()
+                                             // is true anyway; unplugged under GPS load it FALLS)
+#define EXT_TREND_SETTLE_MS (3 * 60 * 1000UL) // blind to the trend this long after a GPS load step
+#define RESERVE_EXIT_PCT (RESERVE_PCT + 10)  // a cell back above this is being charged, USB flag or not
 
 MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
@@ -172,6 +182,7 @@ void MoonTrackModule::toRiding()
 {
     if (gps)
         gps->enable();
+    noteLoadStep();
     mode = RIDING;
     lastMoveMs = millis();
     anchorLat = lastLat; // measure real movement from where we unparked; a false
@@ -189,6 +200,7 @@ void MoonTrackModule::toParked()
                         // line is (evidently) unwired, so GPS_SOFTSLEEP held the module
                         // at acquisition power all night — measured 4.4%/h parked drain.
                         // Peek backoff + RF departure detection make cold peeks affordable.
+    noteLoadStep();
     mode = PARKED;
     parkedCycleMs = millis();
     // RF snapshot for the peek-on-change assist
@@ -203,9 +215,57 @@ void MoonTrackModule::toReserve()
 {
     if (gps)
         gps->disable();
+    noteLoadStep();
     mode = RESERVE;
-    LOG_INFO("MoonTrack: RESERVE (battery %u%% <= %d%%, no external power) - GPS off until plugged in",
+    LOG_INFO("MoonTrack: RESERVE (battery %u%% <= %d%%, no external power) - GPS off until charging is seen",
              powerStatus ? powerStatus->getBatteryChargePercent() : 0, RESERVE_PCT);
+}
+
+static inline int med4(int a, int b, int c, int d)
+{
+    // median of four = mean of the middle two
+    int v[4] = {a, b, c, d};
+    for (int i = 0; i < 3; i++)
+        for (int j = i + 1; j < 4; j++)
+            if (v[j] < v[i]) { int t = v[i]; v[i] = v[j]; v[j] = t; }
+    return (v[1] + v[2]) / 2;
+}
+
+bool MoonTrackModule::externalPower()
+{
+    // getHasUSB() is only ever true above 4.20 V on this board (no VBUS pin) - keep it, it is
+    // right when it is set; the trend covers the other 95 % of a charge.
+    if (powerStatus && powerStatus->getHasUSB())
+        return true;
+    return extByTrend;
+}
+
+void MoonTrackModule::trendTick()
+{
+    if (!powerStatus || !powerStatus->getHasBattery())
+        return;
+    int mv = powerStatus->getBatteryVoltageMv();
+    if (mv <= 0)
+        return;
+    mvHist[mvHead] = (int16_t)mv;
+    mvHead = (mvHead + 1) % MV_HIST_N;
+    if (mvCount < MV_HIST_N) {
+        mvCount++;
+        return; // need the whole window first
+    }
+    if (loadChangeMs && (millis() - loadChangeMs) < EXT_TREND_SETTLE_MS)
+        return; // GPS just switched: skip the IR/relaxation transient
+    auto at = [&](int back) { return (int)mvHist[(mvHead + MV_HIST_N - 1 - back) % MV_HIST_N]; };
+    int now4 = med4(at(0), at(1), at(2), at(3));
+    int old4 = med4(at(EXT_TREND_WINDOW), at(EXT_TREND_WINDOW + 1), at(EXT_TREND_WINDOW + 2), at(EXT_TREND_WINDOW + 3));
+    int d = now4 - old4;
+    if (!extByTrend && d >= EXT_TREND_RISE_MV) {
+        extByTrend = true;
+        LOG_INFO("MoonTrack: cell climbing %+d mV/10min (%d -> %d) -> charger present", d, old4, now4);
+    } else if (extByTrend && d <= EXT_TREND_FLAT_MV && !(powerStatus && powerStatus->getHasUSB())) {
+        extByTrend = false;
+        LOG_INFO("MoonTrack: cell no longer climbing (%+d mV/10min, %d -> %d) -> charger gone", d, old4, now4);
+    }
 }
 
 bool MoonTrackModule::homeNear()
@@ -252,10 +312,24 @@ void MoonTrackModule::powerTick()
     // (the screen kept showing the stale lock the whole time, so it LOOKED fine). Parking
     // exists only to save battery; on external power there is nothing to save. Never park
     // while plugged in, and if we are parked when the plug arrives, ride at once.
-    bool external = powerStatus && powerStatus->getHasUSB();
+    // 2026-09-24: the Udon ride. getHasUSB() is voltage > 4.20 V on a V4 (no VBUS pin), so on a
+    // part-charged cell none of the "on USB" rules ever fired: reserve mode tripped at 50 % after
+    // an all-night sync, the car charger was invisible, and three hours on USB recorded nothing.
+    // External power is now getHasUSB() OR a climbing cell (trendTick), and reserve also lets go
+    // when the percentage climbs back past RESERVE_EXIT_PCT - a cell does not do that on its own.
+    trendTick();
+    bool external = externalPower();
     if (external && mode != RIDING) {
         LOG_INFO("MoonTrack: external power -> RIDING (no parking while plugged in)");
         lowBattTicks = 0;
+        toRiding();
+        return;
+    }
+    if (mode == RESERVE && powerStatus && powerStatus->getBatteryChargePercent() >= RESERVE_EXIT_PCT) {
+        LOG_INFO("MoonTrack: cell back at %u%% >= %d%% - being charged -> RIDING",
+                 powerStatus->getBatteryChargePercent(), RESERVE_EXIT_PCT);
+        lowBattTicks = 0;
+        extByTrend = true; // it is charging whatever the flag says; the trend will clear it when unplugged
         toRiding();
         return;
     }
@@ -275,7 +349,7 @@ void MoonTrackModule::powerTick()
     }
     switch (mode) {
     case RESERVE:
-        break; // GPS off, sleeping; leaves only via external power
+        break; // GPS off, sleeping; leaves via external power (USB flag or trend) or a recovering cell
 
     case RIDING:
         // 2026-07-13: an indoor boot burned the whole RIDING window fixless, then moving
@@ -331,6 +405,7 @@ void MoonTrackModule::powerTick()
             }
             if (gps)
                 gps->enable();
+            noteLoadStep();
             mode = PEEKING;
             peekStartMs = millis();
         }
@@ -383,6 +458,7 @@ void MoonTrackModule::powerTick()
             sendHeartbeat();
             if (gps)
                 gps->disable(); // full off between peeks (softsleep reverted, see toParked)
+            noteLoadStep();
             mode = PARKED;
             parkedCycleMs = millis();
         }
@@ -593,9 +669,11 @@ int32_t MoonTrackModule::runOnce()
     static uint32_t lastStateMs = 0;
     if (millis() - lastStateMs > 60000) { // heartbeat state line for bench debugging
         lastStateMs = millis();
-        LOG_INFO("MoonTrack: state log=%u synced=%u gwHeard=%d mode=%d batch=%u lock=%d",
+        LOG_INFO("MoonTrack: state log=%u synced=%u gwHeard=%d mode=%d batch=%u lock=%d ext=%d/%d mv=%d",
                  (unsigned)logSize(), (unsigned)synced, (int)gatewayHeard(), (int)mode,
-                 (unsigned)batch.size(), gpsStatus ? (int)gpsStatus->getHasLock() : -1);
+                 (unsigned)batch.size(), gpsStatus ? (int)gpsStatus->getHasLock() : -1,
+                 (int)(powerStatus && powerStatus->getHasUSB()), (int)extByTrend,
+                 powerStatus ? powerStatus->getBatteryVoltageMv() : -1);
     }
     return 15 * 1000;
 }
