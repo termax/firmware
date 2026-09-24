@@ -112,6 +112,16 @@ static constexpr NodeNum DEFAULT_REPORT_DEST = 0x8fa66864; // the fleet gateway,
 #ifndef MOONHUT_FRIDGE_CHANNEL
 #define MOONHUT_FRIDGE_CHANNEL "MoonFleet"
 #endif
+// Telemetry channel (docs/moontele-channel-plan.md): preferred when the node holds it, so a node
+// is moved off the people channel by adding MoonTele to it - no second reflash.
+#ifndef MOONHUT_TELE_CHANNEL
+#define MOONHUT_TELE_CHANNEL "MoonTele"
+#endif
+
+static bool isFridgeChannelName(const char *name)
+{
+    return name && (strcasecmp(name, MOONHUT_TELE_CHANNEL) == 0 || strcasecmp(name, MOONHUT_FRIDGE_CHANNEL) == 0);
+}
 
 // Resolve it to a real index by POSITION, never by reading meshtastic_Channel::index.
 // That field is only preinitialised for channels the firmware sets up itself
@@ -120,10 +130,12 @@ static constexpr NodeNum DEFAULT_REPORT_DEST = 0x8fa66864; // the fleet gateway,
 // default, unencrypted, public channel - instead of the fleet's private one.
 static bool findFridgeChannel(ChannelIndex &out)
 {
-    for (ChannelIndex i = 0; i < channels.getNumChannels(); i++) {
-        if (strcasecmp(channels.getGlobalId(i), MOONHUT_FRIDGE_CHANNEL) == 0) {
-            out = i;
-            return true;
+    for (const char *want : {MOONHUT_TELE_CHANNEL, MOONHUT_FRIDGE_CHANNEL}) {
+        for (ChannelIndex i = 0; i < channels.getNumChannels(); i++) {
+            if (strcasecmp(channels.getGlobalId(i), want) == 0) {
+                out = i;
+                return true;
+            }
         }
     }
     out = channels.getPrimaryIndex(); // unprovisioned node: better than nothing
@@ -661,7 +673,9 @@ bool MoonFridgeModule::acceptsCommand(ChannelIndex ch, bool pkiEncrypted) const
     ChannelIndex want = 0;
     if (!findFridgeChannel(want))
         return true;
-    return ch == want;
+    // Commands are honoured on MoonTele OR MoonFleet (the migration may leave the gateway and
+    // the node on different ones for a while); never on the default channel.
+    return isFridgeChannelName(channels.getGlobalId(ch));
 }
 
 // A deliberate double-beep, so it cannot be mistaken for the alarm's single 250 ms

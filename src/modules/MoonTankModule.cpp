@@ -857,11 +857,17 @@ void MoonTankModule::diagnose()
 #define MOONHUT_TANK_CHANNEL "MoonFleet"
 #endif
 
+// Telemetry channel (docs/moontele-channel-plan.md): preferred when held, else the fleet channel.
+#ifndef MOONHUT_TELE_CHANNEL
+#define MOONHUT_TELE_CHANNEL "MoonTele"
+#endif
+
 static ChannelIndex tankChannelIndex()
 {
-    for (ChannelIndex i = 0; i < channels.getNumChannels(); i++)
-        if (strcasecmp(channels.getGlobalId(i), MOONHUT_TANK_CHANNEL) == 0)
-            return i;
+    for (const char *want : {MOONHUT_TELE_CHANNEL, MOONHUT_TANK_CHANNEL})
+        for (ChannelIndex i = 0; i < channels.getNumChannels(); i++)
+            if (strcasecmp(channels.getGlobalId(i), want) == 0)
+                return i;
     return channels.getPrimaryIndex();
 }
 
@@ -1604,7 +1610,7 @@ bool MoonTankModule::acceptsCommand(uint8_t channelIndex, bool pkiEncrypted) con
     if (pkiEncrypted)
         return true;
     const char *name = channels.getGlobalId(channelIndex);
-    return name && strcasecmp(name, MOONHUT_TANK_CHANNEL) == 0;
+    return name && (strcasecmp(name, MOONHUT_TELE_CHANNEL) == 0 || strcasecmp(name, MOONHUT_TANK_CHANNEL) == 0);
 }
 
 const char *MoonTankModule::handleCommand(const char *body)
