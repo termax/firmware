@@ -57,11 +57,16 @@ MoonTrackModule *moonTrackModule = nullptr;
 // per 10 min); a discharge under GPS load runs -10..-30 mV per 10 min; the relaxation step when
 // the GPS load drops is a one-off +12..30 mV. So: +40 mV over a 10 min window = a charger.
 #define EXT_TREND_WINDOW 40                  // ticks of 15 s = 10 min
-#define EXT_TREND_RISE_MV 40                 // rise over the window that means "being charged"
+#define EXT_TREND_RISE_MV 30                 // rise over the window that means "being charged" (bench
+                                             // 09-24: a laptop port at 89 % with the GPS on gave only
+                                             // +30/10 min; the car at 35-50 % gave +45)
 #define EXT_TREND_FLAT_MV 10                 // no longer climbing at least this much = charger gone
                                              // (a full cell on a charger plateaus, but then getHasUSB()
                                              // is true anyway; unplugged under GPS load it FALLS)
-#define EXT_TREND_SETTLE_MS (3 * 60 * 1000UL) // blind to the trend this long after a GPS load step
+#define EXT_TREND_SETTLE_MS (11 * 60 * 1000UL) // blind to the trend until the window no longer
+                                                // straddles a GPS on/off step (window + 1 min): a
+                                                // load step is a one-off +12..30 mV and must never
+                                                // be able to vote against the 30 mV bar
 #define RESERVE_EXIT_PCT (RESERVE_PCT + 10)  // a cell back above this is being charged, USB flag or not
 
 MoonTrackModule::MoonTrackModule()
