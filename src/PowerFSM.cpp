@@ -415,10 +415,19 @@ void PowerFSM_setup()
 
         // If ESP32 and using power-saving, timer mover from DARK to light-sleep
         // Also serves purpose of the old DARK to DARK transition(?) See https://github.com/meshtastic/firmware/issues/3517
+#ifdef MOONHUT_TRACKER
+        // 2026-09-26: RESERVE drained ~6 %/h, faster than riding with the GPS on. Every radio wake
+        // and every ls_secs timer leaves light sleep for DARK, which stayed fully awake for
+        // wait_bluetooth_secs (60 s); on a busy channel (Udon, 5-15 % util) the node never slept.
+        // The tracker is never used from a phone on battery; PRG still wakes it to ON for that.
+        // RIDING/PEEKING veto sleep anyway, so this only shortens PARKED/RESERVE wakes.
+        powerFSM.add_timed_transition(&stateDARK, &stateLS, default_min_wake_secs * 1000UL, NULL, "Tracker wake timeout");
+#else
         powerFSM.add_timed_transition(
             &stateDARK, &stateLS,
             Default::getConfiguredOrDefaultMs(config.power.wait_bluetooth_secs, default_wait_bluetooth_secs), NULL,
             "Bluetooth timeout");
+#endif
     } else {
         // If ESP32, but not using power-saving, check periodically if config has drifted out of stateDark
         powerFSM.add_timed_transition(&stateDARK, &stateDARK,

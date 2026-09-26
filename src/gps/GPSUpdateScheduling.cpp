@@ -103,6 +103,19 @@ bool GPSUpdateScheduling::searchedTooLong()
     constexpr uint32_t postFailureSearchMs = 5UL * oneMinuteMs; // Tighter dwell once we know the environment is hostile
     uint32_t elapsed = elapsedSearchMs();
 
+#ifdef MOONHUT_TRACKER
+    // 2026-09-26, MoonTrack on the charger at Udon: one fix every ~65 min, metronomic. An always-on
+    // GPS (gps_update_interval <= 10 s) never calls down() after a lock, so this "search" never ends
+    // and times out after the broadcast interval. The timeout is checked every 50 ms but a fix
+    // arrives once a second, so it almost always lands on a no-fix pass: GPS::runOnce declares the
+    // lock lost, informSearchFailed() engages the failure backoff, and the receiver idles for an
+    // hour, searches 5 min, fails the same race, idles another hour. The tracker module owns GPS
+    // power (it parks, peeks and holds reserve itself); an always-on GPS must never time out.
+    if (Default::getConfiguredOrDefaultMs(config.position.gps_update_interval, default_gps_update_interval) <=
+        10 * 1000UL) // GPS_UPDATE_ALWAYS_ON_THRESHOLD_MS (GPS.h)
+        return false;
+#endif
+
     // Anything over 15 minutes is too long, regardless of the broadcast interval.
     if (elapsed > maxSearchClampMs)
         return true;

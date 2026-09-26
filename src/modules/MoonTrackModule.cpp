@@ -68,6 +68,9 @@ MoonTrackModule *moonTrackModule = nullptr;
                                                 // load step is a one-off +12..30 mV and must never
                                                 // be able to vote against the 30 mV bar
 #define RESERVE_EXIT_PCT (RESERVE_PCT + 10)  // a cell back above this is being charged, USB flag or not
+#define FIX_FRESH_MS (30 * 1000UL)           // a lock older than this is the stale one disable() leaves behind
+#define PROBE_MIN_MS (2 * 60 * 1000UL)       // gateway probe backoff: 2, 4, 8, 16, 30 min while unanswered
+#define PROBE_MAX_MS (30 * 60 * 1000UL)      // (2026-09-26: a flat 2 min was 30 full-power TX/h away from home)
 
 MoonTrackModule::MoonTrackModule()
     : SinglePortModule("moontrack", TRACK_PORT), concurrency::OSThread("MoonTrack")
@@ -113,7 +116,11 @@ void MoonTrackModule::saveState()
 
 void MoonTrackModule::maybeRecord()
 {
-    if (!gpsStatus || !gpsStatus->getHasLock())
+    // Only a fix the receiver produced just now. gps->disable() clears nothing, so with the GPS off
+    // (PARKED, RESERVE) gpsStatus still reports the last lock: RESERVE on 09-24/25 kept writing that
+    // frozen fix as a keepalive every 10 min, and each one was a backlog the node then woke to probe
+    // and sync over LoRa all night.
+    if (!gpsStatus || !gpsStatus->getHasLock() || (millis() - gpsStatus->getLastFixMillis()) > FIX_FRESH_MS)
         return;
     int32_t lat = gpsStatus->getLatitude();
     int32_t lon = gpsStatus->getLongitude();
@@ -583,15 +590,18 @@ void MoonTrackModule::syncTick()
         // meshhub answers 'TP' probes, and the answer updates last_heard (= presence).
         if (logSize() > synced && !gatewayHeard()) {
             static uint32_t lastProbeMs = 0;
-            if (millis() - lastProbeMs > 120000) {
+            if (gwSeenMs && (millis() - gwSeenMs) < probeGapMs)
+                probeGapMs = PROBE_MIN_MS; // home answered since the last probe - back to the short gap
+            if (!lastProbeMs || millis() - lastProbeMs > probeGapMs) {
                 lastProbeMs = millis();
+                probeGapMs = probeGapMs * 2 > PROBE_MAX_MS ? PROBE_MAX_MS : probeGapMs * 2;
                 meshtastic_MeshPacket *p = allocDataPacket();
                 p->to = GATEWAY_NODE;
                 p->decoded.payload.bytes[0] = 'T';
                 p->decoded.payload.bytes[1] = 'P';
                 p->decoded.payload.size = 2;
                 service->sendToMesh(p, RX_SRC_LOCAL, false);
-                LOG_INFO("MoonTrack: probing gateway");
+                LOG_INFO("MoonTrack: probing gateway (next in %u min if unanswered)", (unsigned)(probeGapMs / 60000));
             }
         }
         if (logSize() > synced && gatewayHeard() && airTime) {
@@ -674,9 +684,13 @@ int32_t MoonTrackModule::runOnce()
     static uint32_t lastStateMs = 0;
     if (millis() - lastStateMs > 60000) { // heartbeat state line for bench debugging
         lastStateMs = millis();
-        LOG_INFO("MoonTrack: state log=%u synced=%u gwHeard=%d mode=%d batch=%u lock=%d ext=%d/%d mv=%d",
+        // fixAge/sats/pdop: indoor scatter (150-200 m, 09-25) still defeats the park gate; these are
+        // the numbers a fix-quality filter would be tuned on
+        LOG_INFO("MoonTrack: state log=%u synced=%u gwHeard=%d mode=%d batch=%u lock=%d fixAge=%ds sats=%u pdop=%u ext=%d/%d mv=%d",
                  (unsigned)logSize(), (unsigned)synced, (int)gatewayHeard(), (int)mode,
                  (unsigned)batch.size(), gpsStatus ? (int)gpsStatus->getHasLock() : -1,
+                 (gpsStatus && gpsStatus->getLastFixMillis()) ? (int)((millis() - gpsStatus->getLastFixMillis()) / 1000) : -1,
+                 gpsStatus ? (unsigned)gpsStatus->getNumSatellites() : 0, gpsStatus ? (unsigned)gpsStatus->getDOP() : 0,
                  (int)(powerStatus && powerStatus->getHasUSB()), (int)extByTrend,
                  powerStatus ? powerStatus->getBatteryVoltageMv() : -1);
     }

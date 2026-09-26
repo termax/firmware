@@ -64,6 +64,7 @@ class MoonTrackModule : public SinglePortModule, private concurrency::OSThread
     uint32_t presenceSince = 0; // millis when gateway first heard in current streak
     uint32_t gwSeenMs = 0;      // own bookkeeping: nodedb lastHeard ignores API-originated
                                 // packets, so we track gateway contact ourselves (port 260)
+    uint32_t probeGapMs = 2 * 60 * 1000UL; // current gap between unanswered gateway probes
 
     // Parked/riding power state machine (P5): parked = GPS off + periodic peek.
     // Light sleep comes from provisioning (is_power_saving=true, role CLIENT).
